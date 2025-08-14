@@ -1,0 +1,14 @@
+transformers>=4.44
+peft>=0.12
+trl>=0.9
+datasets>=2.20
+accelerate>=0.33
+bitsandbytes>=0.47
+evaluate
+sacrebleu
+rouge-score
+scikit-learn
+lxml
+matplotlib
+huggingface_hub
+tensorboard
