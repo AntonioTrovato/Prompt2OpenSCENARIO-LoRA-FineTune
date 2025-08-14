@@ -21,14 +21,14 @@ def format_example(ex, sys_tmpl, stop_seq):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--cfg", default="config/qlora-codellama13b.yaml")
+    p.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     args = p.parse_args()
     import yaml
     cfg = yaml.safe_load(open(args.cfg))
 
     random.seed(cfg["seed"]); torch.manual_seed(cfg["seed"])
 
-    # Tokenizer & modello (QLoRA)
+    # Tokenizer & modello (LoRA)
     tok = AutoTokenizer.from_pretrained(cfg["base_model"], use_fast=False)
     # Aggiungiamo esplicitamente la stop sequence come token normale (non speciale)
     if "</OpenSCENARIO>" not in tok.get_vocab():
