@@ -259,16 +259,27 @@ def main():
     cfg = yaml.safe_load(open(args.cfg))
     random.seed(cfg["seed"]); torch.manual_seed(cfg["seed"])
 
-    tok = AutoTokenizer.from_pretrained(cfg["base_model"], use_fast=False)
+    tok = AutoTokenizer.from_pretrained(cfg["base_model"], use_fast=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"
 
+    # Template single-turn compatibile con assistant_only_loss
+    tok.chat_template = (
+        "{{ bos_token }}"
+        "{% for m in messages %}"
+        "{% if m['role'] == 'user' %}"
+        "[INST] {{ m['content'] }} [/INST]"
+        "{% elif m['role'] == 'assistant' %}"
+        "{% generation %}{{ m['content'] }}{% endgeneration %}{{ eos_token }}"
+        "{% endif %}"
+        "{% endfor %}"
+    )
+
     dtype = torch.bfloat16 if str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16" else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         cfg["base_model"],
-        torch_dtype=dtype,
-        device_map="auto"
+        torch_dtype=dtype
     )
     model.config.pad_token_id = tok.pad_token_id
     if cfg.get("gradient_checkpointing", False):
@@ -304,12 +315,34 @@ def main():
         task_type="CAUSAL_LM"
     )
 
+    def to_messages(ex):
+        system = ex["system"].strip()
+        user = ex["user"].strip()
+        assistant = reduce_assistant(ex["assistant"].strip(), args.reduce_mode)
+        if not assistant.endswith(stop_seq):
+            assistant += stop_seq
+
+        # fondi il system nel primo user (stile CodeLlama)
+        user_with_sys = f"<<SYS>>\n{system}\n<</SYS>>\n\n{user}"
+        if args.use_feature_hints:
+            try:
+                feats = extract_features_from_xosc(ex["assistant"])
+                user_with_sys += "\n\n<HINTS>\n" + json.dumps(feats, ensure_ascii=False) + "\n</HINTS>\n"
+            except Exception:
+                pass
+
+        return {
+            "messages": [
+                {"role": "user", "content": user_with_sys},
+                {"role": "assistant", "content": assistant},
+            ]
+        }
+
+    ds = ds.map(to_messages)
+
     sft_cfg = SFTConfig(
-        max_seq_length=cfg["max_seq_len"],
+        max_length=cfg["max_length"],  # <-- usa max_length dallo YAML
         packing=cfg["packing"],
-        dataset_text_field=None,
-        formatting_func=formatting_func,
-        train_on_source=False,
         eval_strategy="steps",
         eval_steps=cfg["eval_steps"],
         logging_steps=cfg["logging_steps"],
@@ -319,21 +352,22 @@ def main():
         per_device_train_batch_size=cfg["train_batch_size"],
         gradient_accumulation_steps=cfg["grad_accum_steps"],
         per_device_eval_batch_size=cfg["eval_batch_size"],
-        lr_scheduler_type=cfg.get("lr_scheduler_type","cosine"),
+        lr_scheduler_type=cfg.get("lr_scheduler_type", "cosine"),
         warmup_ratio=cfg["warmup_ratio"],
         output_dir=cfg["output_dir"],
         report_to=["tensorboard"],
         bf16=(str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16"),
-        gradient_checkpointing=cfg["gradient_checkpointing"]
+        gradient_checkpointing=cfg["gradient_checkpointing"],
+        assistant_only_loss=True,  # ora supportato (dataset conversazionale + template ok)
     )
 
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tok,
-        peft_config=peft_cfg,
+        args=sft_cfg,
         train_dataset=ds["train"],
         eval_dataset=ds["validation"],
-        args=sft_cfg
+        peft_config=peft_cfg,
+        processing_class=tok,  # al posto di tokenizer=
     )
 
     trainer.train()

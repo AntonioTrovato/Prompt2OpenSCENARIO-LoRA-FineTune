@@ -20,7 +20,7 @@ save_safetensors: true
 #bnb_4bit_compute_dtype: "bfloat16"
 
 # Training
-max_seq_len: 3072
+max_length: 3072
 train_batch_size: 1
 grad_accum_steps: 16
 eval_batch_size: 1
