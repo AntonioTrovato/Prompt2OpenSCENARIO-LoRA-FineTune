@@ -1,29 +1,26 @@
-import os, json, math, argparse, random
-from dataclasses import dataclass
+import os, json, argparse, random
 from typing import Dict, List, Any
-from datasets import load_dataset, DatasetDict
-#from transformers import (AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig)
-from transformers import (AutoModelForCausalLM, AutoTokenizer)
-from transformers import TrainingArguments
+from datasets import load_dataset, Dataset, DatasetDict
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
 from peft import LoraConfig
 import torch
-from huggingface_hub import HfApi
 import xml.etree.ElementTree as ET
+from lxml import etree
+import yaml
 
+# ---------------------------
+# Feature extractor (fornita)
+# ---------------------------
 def extract_features_from_xosc(xosc_text: str) -> dict:
-    """
-    Estrae feature salienti dall'OpenSCENARIO 1.0 (best-effort, robusta a mancanze).
-    Se alcuni campi non ci sono, li lascia vuoti.
-    """
     feat = {
         "map": None,
         "time_of_day": None,
         "weather": {"cloud_state": None, "precipitation": None, "fog": None, "wind": None},
         "speed_limits": [],
-        "entities": [],   # [{"name":..., "type": "ego|vehicle|pedestrian|misc"}]
-        "initial_positions": [],  # [{"entity": name, "x":.., "y":.., "z":.., "h":..}]
-        "events": [],     # descrizioni brevi di azioni/trigger ("after 5s lead brakes", ecc.)
+        "entities": [],
+        "initial_positions": [],
+        "events": [],
         "notes": []
     }
     try:
@@ -32,12 +29,10 @@ def extract_features_from_xosc(xosc_text: str) -> dict:
         feat["notes"].append("xml_parse_failed")
         return feat
 
-    # RoadNetwork / LogicFile
     rn = root.find(".//RoadNetwork/LogicFile")
     if rn is not None:
         feat["map"] = rn.attrib.get("filepath") or rn.attrib.get("file") or None
 
-    # Environment / TimeOfDay / Weather
     tod = root.find(".//Environment/TimeOfDay")
     if tod is not None:
         feat["time_of_day"] = tod.attrib.get("dateTime") or tod.attrib.get("animation") or None
@@ -53,13 +48,11 @@ def extract_features_from_xosc(xosc_text: str) -> dict:
         if wind is not None:
             feat["weather"]["wind"] = wind.attrib.get("direction") or wind.attrib.get("speed")
 
-    # Speed limits (molti scenari li esprimono come ParameterDeclaration o TrafficRules)
     for sl in root.findall(".//SpeedLimitAction") + root.findall(".//SpeedAction"):
         maxkph = sl.attrib.get("max") or sl.attrib.get("target")
         if maxkph:
             feat["speed_limits"].append(maxkph)
 
-    # Entities
     for ent in root.findall(".//Entities/*"):
         tag = ent.tag.lower()
         name = ent.attrib.get("name") or ent.attrib.get("nameRef")
@@ -71,7 +64,6 @@ def extract_features_from_xosc(xosc_text: str) -> dict:
         if name:
             feat["entities"].append({"name": name, "type": etype})
 
-    # Initial positions (Init -> Private -> TeleportAction / WorldPosition)
     for priv in root.findall(".//Init/Actions/Private"):
         name = priv.attrib.get("entityRef")
         wp = priv.find(".//WorldPosition")
@@ -82,7 +74,6 @@ def extract_features_from_xosc(xosc_text: str) -> dict:
                 "z": wp.attrib.get("z"), "h": wp.attrib.get("h")
             })
 
-    # Events & Triggers (best-effort: estraiamo label, delay, tipo azione)
     for ev in root.findall(".//Storyboard//Event"):
         ev_name = ev.attrib.get("name")
         act = ev.find(".//Action")
@@ -90,109 +81,220 @@ def extract_features_from_xosc(xosc_text: str) -> dict:
         desc = []
         if ev_name: desc.append(ev_name)
         if trig is not None:
-            # cerca after delay
             for cond in trig.findall(".//ByValueCondition/SimulationTimeCondition"):
                 delay = cond.attrib.get("value")
                 if delay:
                     desc.append(f"after {delay}s")
         if act is not None:
-            # tipo azione comune (SpeedAction, LaneChangeAction, etc.)
             atag = next((c.tag for c in list(act) if isinstance(c.tag, str)), None)
             if atag:
                 desc.append(atag)
         if desc:
             feat["events"].append(" ".join(desc))
-
     return feat
 
-def format_example(ex, sys_tmpl, stop_seq, use_feature_hints):
+# ---------------------------------
+# Riduzione on-the-fly dell'XML gold
+# ---------------------------------
+def minify_xml(x: str) -> str:
+    try:
+        parser = etree.XMLParser(remove_blank_text=True, remove_comments=True)
+        root = etree.fromstring(x.encode("utf-8"), parser=parser)
+        return etree.tostring(root, encoding="unicode", pretty_print=False)
+    except Exception:
+        return x
+
+def build_minimal_xosc_from_features(feat: dict) -> str:
+    # Fallbacks
+    map_path = feat.get("map") or "Town01.xodr"
+    time_of_day = feat.get("time_of_day") or "2025-01-01T12:00:00"
+    weather = feat.get("weather") or {}
+    cloud = weather.get("cloud_state") or "free"
+    precip = weather.get("precipitation") or "dry"
+
+    entities = feat.get("entities") or []
+    if not entities:
+        entities = [{"name": "ego", "type": "vehicle"}]
+
+    init_pos_by_entity = {}
+    for ip in (feat.get("initial_positions") or []):
+        init_pos_by_entity[ip.get("entity")] = {
+            "x": ip.get("x") or "0", "y": ip.get("y") or "0",
+            "z": ip.get("z") or "0", "h": ip.get("h") or "0"
+        }
+
+    def mk_pos(name):
+        p = init_pos_by_entity.get(name) or {"x":"0","y":"0","z":"0","h":"0"}
+        return p["x"], p["y"], p["z"], p["h"]
+
+    E = etree.Element
+    root = E("OpenSCENARIO")
+
+    fh = E("FileHeader", revMajor="1", revMinor="0", date="2025-01-01T00:00:00", description="Minimal scenario")
+    root.append(fh)
+
+    rn = E("RoadNetwork")
+    rn.append(E("LogicFile", filepath=map_path))
+    root.append(rn)
+
+    root.append(E("ParameterDeclarations"))
+    root.append(E("CatalogLocations"))
+
+    ents = E("Entities")
+    for ent in entities:
+        nm = ent.get("name") or "ego"
+        typ = ent.get("type") or "vehicle"
+        if typ == "pedestrian":
+            obj = E("Pedestrian", name=nm)
+        elif typ == "misc":
+            obj = E("MiscObject", name=nm)
+        else:
+            obj = E("Vehicle", name=nm)
+        ents.append(obj)
+    root.append(ents)
+
+    sb = E("Storyboard")
+
+    init = E("Init")
+    actions = E("Actions")
+    for ent in entities:
+        nm = ent.get("name") or "ego"
+        priv = E("Private", entityRef=nm)
+        actions_priv = E("Actions")
+        act = E("Action")
+        tp = E("TeleportAction")
+        pos = E("Position")
+        x,y,z,h = mk_pos(nm)
+        pos.append(E("WorldPosition", x=x, y=y, z=z, h=h))
+        tp.append(pos)
+        act.append(tp)
+        actions_priv.append(act)
+        priv.append(actions_priv)
+        actions.append(priv)
+    init.append(actions)
+    sb.append(init)
+
+    story = E("Story", name="main_story")
+    act = E("Act", name="act_1")
+    for ent in entities:
+        nm = ent.get("name") or "ego"
+        mg = E("ManeuverGroup", name=f"mg_{nm}")
+        man = E("Maneuver", name=f"man_{nm}")
+        ev = E("Event", name=f"ev_{nm}", priority="overwrite")
+        ev_action = E("Action")
+        ev_action.append(E("ControllerAction"))
+        ev.append(ev_action)
+        st = E("StartTrigger")
+        cg = E("ConditionGroup")
+        c = E("Condition", delay="0", conditionEdge="rising")
+        byv = E("ByValueCondition")
+        byv.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
+        c.append(byv); cg.append(c); st.append(c)
+        ev.append(st)
+        man.append(ev); mg.append(man)
+        act.append(mg)
+    st_act = E("StartTrigger")
+    cg_act = E("ConditionGroup")
+    c_act = E("Condition", delay="0", conditionEdge="rising")
+    byv_act = E("ByValueCondition")
+    byv_act.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
+    c_act.append(byv_act); cg_act.append(c_act); st_act.append(c_act)
+    act.append(st_act)
+    story.append(act)
+    sb.append(story)
+    root.append(sb)
+
+    return etree.tostring(root, encoding="unicode", pretty_print=False)
+
+def reduce_assistant(xosc_text: str, mode: str) -> str:
+    if mode == "minify_only":
+        return minify_xml(xosc_text)
+    if mode == "features_skeleton":
+        try:
+            feats = extract_features_from_xosc(xosc_text)
+            return build_minimal_xosc_from_features(feats)
+        except Exception:
+            return minify_xml(xosc_text)
+    # "none"
+    return xosc_text
+
+# -------------------------
+# Formatting per il trainer
+# -------------------------
+def format_example(ex, sys_tmpl, stop_seq, use_feature_hints: bool, reduce_mode: str):
     system = ex["system"].strip()
     user = ex["user"].strip()
     assistant = ex["assistant"].strip()
-    # HINTS opzionali dal target
+
+    assistant_reduced = reduce_assistant(assistant, reduce_mode)
+
     hints_block = ""
     if use_feature_hints:
         try:
-            feats = extract_features_from_xosc(assistant)
+            feats = extract_features_from_xosc(assistant)  # dal target originale
             hints_block = "\n\n<HINTS>\n" + json.dumps(feats, ensure_ascii=False) + "\n</HINTS>\n"
         except Exception:
             hints_block = ""
+
     prompt = sys_tmpl.format(system=system, user=(user + hints_block))
-    # Salvaguardia: garantisci newline dopo [/INST] se manca
     if prompt.endswith("[/INST]"):
         prompt = prompt + "\n"
-    # Concatena output gold; NON aggiungere eos come stop token personalizzato,
-    # ma chiudi sempre con lo stop_sequence nel target (utile anche a inferenza).
-    text = prompt + assistant
-    if not assistant.strip().endswith(stop_seq):
+
+    text = prompt + assistant_reduced
+    if not assistant_reduced.strip().endswith(stop_seq):
         text += stop_seq
     return text
 
+# -----
+# Main
+# -----
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     p.add_argument("--jsonl_path", default="")
     p.add_argument("--use_feature_hints", action="store_true")
+    p.add_argument("--reduce_mode", choices=["none","minify_only","features_skeleton"], default="minify_only")
     args = p.parse_args()
-    import yaml
-    cfg = yaml.safe_load(open(args.cfg))
 
+    cfg = yaml.safe_load(open(args.cfg))
     random.seed(cfg["seed"]); torch.manual_seed(cfg["seed"])
 
-    # Tokenizer & modello (LoRA)
     tok = AutoTokenizer.from_pretrained(cfg["base_model"], use_fast=False)
-    # LLaMA: pad_token = eos_token
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"
-    #bnb = BitsAndBytesConfig(
-    #    load_in_4bit=cfg["load_in_4bit"],
-    #    bnb_4bit_quant_type=cfg["bnb_4bit_quant_type"],
-    #    bnb_4bit_use_double_quant=cfg["bnb_4bit_use_double_quant"],
-    #    bnb_4bit_compute_dtype=getattr(torch, cfg["bnb_4bit_compute_dtype"])
-    #)
-    #model = AutoModelForCausalLM.from_pretrained(
-    #    cfg["base_model"],
-    #    quantization_config=bnb,
-    #    torch_dtype=torch.bfloat16,
-    #    device_map="auto"
-    #)
 
     dtype = torch.bfloat16 if str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16" else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         cfg["base_model"],
-        torch_dtype = dtype,
-        device_map = "auto",
-        max_memory = {0: "24GiB", "cpu" : "48GiB"}
+        torch_dtype=dtype,
+        device_map="auto"
     )
     model.config.pad_token_id = tok.pad_token_id
-
-    # Se gradient checkpointing: disattiva cache
     if cfg.get("gradient_checkpointing", False):
         model.config.use_cache = False
 
-    # (Niente token extra: non modifichiamo il vocab)
-
-    # Dataset da HF Datasets
+    # Dataset
     if args.jsonl_path:
-        # carica JSONL locale pre-processato
-        import json, datasets
         rows = [json.loads(line) for line in open(args.jsonl_path, "r", encoding="utf-8")]
-        ds = datasets.Dataset.from_list(rows)
+        ds = Dataset.from_list(rows)
     else:
         ds = load_dataset(cfg["hf_dataset_repo"], split="train")
-    # split train/val
+
     ds = ds.train_test_split(test_size=cfg.get("val_split_ratio", 0.1), seed=cfg["seed"])
     ds = DatasetDict({"train": ds["train"], "validation": ds["test"]})
 
-    # Template
     sys_tmpl = open("prompt_templates/codellama_inst.txt", "r", encoding="utf-8").read()
     stop_seq = cfg["stop_sequence"]
 
     def formatting_func(batch):
-        return [format_example(ex, sys_tmpl, stop_seq, use_feature_hints=args.use_feature_hints) for ex in batch]
+        return [
+            format_example(ex, sys_tmpl, stop_seq,
+                           use_feature_hints=args.use_feature_hints,
+                           reduce_mode=args.reduce_mode)
+            for ex in batch
+        ]
 
-    # LoRA
     peft_cfg = LoraConfig(
         r=cfg["lora_r"],
         lora_alpha=cfg["lora_alpha"],
@@ -202,13 +304,12 @@ def main():
         task_type="CAUSAL_LM"
     )
 
-    # Trainer
     sft_cfg = SFTConfig(
         max_seq_length=cfg["max_seq_len"],
         packing=cfg["packing"],
-        dataset_text_field=None,  # usiamo formatting_func
+        dataset_text_field=None,
         formatting_func=formatting_func,
-        train_on_source=False,    # maschera il prompt, addestra solo sulla risposta
+        train_on_source=False,
         eval_strategy="steps",
         eval_steps=cfg["eval_steps"],
         logging_steps=cfg["logging_steps"],
@@ -222,7 +323,7 @@ def main():
         warmup_ratio=cfg["warmup_ratio"],
         output_dir=cfg["output_dir"],
         report_to=["tensorboard"],
-        bf16 = (str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16"),
+        bf16=(str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16"),
         gradient_checkpointing=cfg["gradient_checkpointing"]
     )
 
@@ -239,7 +340,6 @@ def main():
     trainer.save_model(cfg["output_dir"])
     tok.save_pretrained(cfg["output_dir"])
 
-    # Push su HF Models
     if cfg.get("push_to_hub", False):
         repo_id = cfg.get("hub_model_id") or cfg["hf_model_repo"]
         trainer.push_to_hub(repo_id=repo_id, commit_message="Upload LoRA adapters")

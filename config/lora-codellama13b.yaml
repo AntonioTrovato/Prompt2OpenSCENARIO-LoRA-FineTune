@@ -40,7 +40,7 @@ push_to_hub: true
 hub_model_id: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
 
 # Generation (per validazione)
-gen_max_new_tokens: 1800
+gen_max_new_tokens: 4000
 gen_temperature: 0.3
 gen_top_p: 0.9
 stop_sequence: "</OpenSCENARIO>"
