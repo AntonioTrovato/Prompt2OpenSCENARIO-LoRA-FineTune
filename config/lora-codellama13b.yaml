@@ -1,4 +1,4 @@
-base_model: codellama/CodeLlama-13b-Instruct-hf
+base_model: C:\Users\sesal\Documents\AntonioTrovato\CodeLlama-13b-Instruct-hf
 hf_model_repo: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
 hf_dataset_repo: anto0699/Prompt2OpenSCENARIO-LoRA-FineTune
 output_dir: runs/codellama13b-lora
@@ -13,6 +13,8 @@ bias: "none"
 
 # Quantizzazione
 load_in_4bit: false
+torch_dtype: float64
+save_safetensors: true
 #bnb_4bit_quant_type: "nf4"
 #bnb_4bit_use_double_quant: true
 #bnb_4bit_compute_dtype: "bfloat16"
@@ -26,11 +28,16 @@ learning_rate: 2.0e-4
 weight_decay: 0.0
 num_epochs: 2
 warmup_ratio: 0.05
+lr_scheduler_type: cosine
 logging_steps: 10
 eval_steps: 200
-save_steps: 500
+save_steps: 1000
 gradient_checkpointing: true
-packing: true
+packing: false
+
+# Hub
+push_to_hub: true
+hub_model_id: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
 
 # Generation (per validazione)
 gen_max_new_tokens: 1800

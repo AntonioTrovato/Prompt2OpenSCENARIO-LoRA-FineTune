@@ -8,6 +8,8 @@ import sacrebleu
 from rouge_score.rouge_scorer import RougeScorer
 from collections import Counter
 
+from scripts.train import extract_features_from_xosc
+
 try:
     import evaluate
     meteor_metric = evaluate.load("meteor")  # può scaricare asset al primo run
@@ -93,13 +95,23 @@ def xsd_ok(x, xsd_path):
         return False, str(e)
 
 def generate(model, tok, prompt, eos):
+    enc = tok(prompt, return_tensors="pt")
+    enc = {k: v.to(model.device) for k, v in enc.items()}
     out = model.generate(
-        **tok(prompt, return_tensors="pt").to(model.device),
-        max_new_tokens=1800, temperature=0.3, top_p=0.9,
-        eos_token_id=tok.convert_tokens_to_ids(eos)
+        ** enc,
+        max_new_tokens = 1800, temperature = 0.3, top_p = 0.9,
+        pad_token_id = tok.pad_token_id,
+        eos_token_id = tok.eos_token_id  # eos "normale", NON lo stop custom
     )
     txt = tok.decode(out[0], skip_special_tokens=True)
-    # prendi solo da prompt in poi
+    # estrai SOLO l'XML, dal primo <OpenSCENARIO ...> fino a </OpenSCENARIO>
+    m = re.search(r"<OpenSCENARIO\b.*</OpenSCENARIO>", txt, flags=re.DOTALL)
+    if m:
+        return m.group(0).strip()
+    # fallback: taglia dopo la stop sequence se presente
+    if eos in txt:
+        return txt.split(eos)[0].strip() + eos
+    # ultimo fallback: rimuovi il prompt e restituisci il resto
     return txt.split(prompt)[-1].strip()
 
 def main():
@@ -113,7 +125,9 @@ def main():
     ap.add_argument("--sys_template", default="../prompt_templates/codellama_inst.txt")
     args = ap.parse_args()
 
-    tok = AutoTokenizer.from_pretrained(args["base_model"] if isinstance(args, dict) else args.base_model, use_fast=False)
+    tok = AutoTokenizer.from_pretrained(args.base_model, use_fast=False)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.base_model, torch_dtype="auto", device_map="auto")
     model = PeftModel.from_pretrained(model, args.lora_repo)
     model.eval()
@@ -121,7 +135,7 @@ def main():
     sys_tmpl = open(args.sys_template, "r", encoding="utf-8").read()
     eos = "</OpenSCENARIO>"
 
-    ds = load_dataset(args.hf_dataset_repo, split="train")  # contiene già train+val; usiamo lo stesso split
+    ds = load_dataset(args.hf_dataset_repo, split="train")
     # ricrea split locale per coerenza con train.py: usiamo il 10% tail come val
     n = len(ds)
     cut = int(n*0.9)
@@ -150,7 +164,18 @@ def main():
         r = rouge.score(gold, pred)["rougeL"].fmeasure
 
         # slot F1 (booleane)
-        p_slots, g_slots = extract_slots(pred), extract_slots(gold)
+        p_slots, g_slots = extract_features_from_xosc(pred), extract_features_from_xosc(gold)
+        # converti in boolean slots sintetici per F1 (come prima)
+        def slots_to_bools(s):
+            return {
+                "has_map": bool(s.get("map")),
+                "has_time": bool(s.get("time_of_day")),
+                "has_weather": any(v for v in (s.get("weather") or {}).values() if v),
+                "veh_ge1": sum(1 for e in s.get("entities", []) if e.get("type") != "pedestrian") >= 1,
+                "veh_ge2": sum(1 for e in s.get("entities", []) if e.get("type") != "pedestrian") >= 2,
+                "ends_close": pred.strip().endswith("</OpenSCENARIO>")
+            }
+        p_slots, g_slots = slots_to_bools(p_slots), slots_to_bools(g_slots)
         prec, rec, f1, acc = bool_f1(g_slots, p_slots)
 
         # --- ADD: chrF++ ---
@@ -200,7 +225,8 @@ def main():
 
         preds.append(pred); golds.append(gold)
 
-    bleu = sacrebleu.corpus_bleu(bleu_hyps, list(zip(*bleu_refs)))
+    refs = list(map(list, zip(*bleu_refs)))  # shape: [n_refs][n_hyps]
+    bleu = sacrebleu.corpus_bleu(bleu_hyps, refs)
     # aggregazioni
     import numpy as np, json, os
     def mean(key): return float(np.nanmean([row[key] for row in rows if row[key] is not None]))
