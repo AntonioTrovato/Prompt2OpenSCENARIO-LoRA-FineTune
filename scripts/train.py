@@ -1,3 +1,4 @@
+import glob
 import os, json, argparse, random
 from typing import Dict, List, Any
 from datasets import load_dataset, Dataset, DatasetDict
@@ -276,10 +277,26 @@ def main():
         "{% endfor %}"
     )
 
+    from transformers import BitsAndBytesConfig
+
+    use_4bit = bool(cfg.get("load_in_4bit", False))
     dtype = torch.bfloat16 if str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16" else torch.float16
+
+    bnb_config = None
+    if use_4bit:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=cfg.get("bnb_4bit_quant_type", "nf4"),
+            bnb_4bit_use_double_quant=cfg.get("bnb_4bit_use_double_quant", True),
+            bnb_4bit_compute_dtype=torch.bfloat16 if str(
+                cfg.get("bnb_4bit_compute_dtype", "bfloat16")) == "bfloat16" else torch.float16,
+        )
+
     model = AutoModelForCausalLM.from_pretrained(
         cfg["base_model"],
-        torch_dtype=dtype
+        torch_dtype=dtype if not use_4bit else None,
+        quantization_config=bnb_config if use_4bit else None,
+        device_map="auto" if use_4bit else None,  # utile con 4-bit
     )
     model.config.pad_token_id = tok.pad_token_id
     if cfg.get("gradient_checkpointing", False):
@@ -359,6 +376,7 @@ def main():
         bf16=(str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16"),
         gradient_checkpointing=cfg["gradient_checkpointing"],
         assistant_only_loss=True,  # ora supportato (dataset conversazionale + template ok)
+        save_total_limit=cfg.get("save_total_limit", 3),
     )
 
     trainer = SFTTrainer(
@@ -370,7 +388,19 @@ def main():
         processing_class=tok,  # al posto di tokenizer=
     )
 
-    trainer.train()
+    last_ckpt = None
+    if os.path.isdir(cfg["output_dir"]):
+        candidates = sorted(glob.glob(os.path.join(cfg["output_dir"], "checkpoint-*")),
+                            key=os.path.getmtime)
+        if candidates:
+            last_ckpt = candidates[-1]
+
+    if last_ckpt:
+        print(f"Resuming from checkpoint: {last_ckpt}")
+        trainer.train(resume_from_checkpoint=last_ckpt)
+    else:
+        trainer.train()
+
     trainer.save_model(cfg["output_dir"])
     tok.save_pretrained(cfg["output_dir"])
 

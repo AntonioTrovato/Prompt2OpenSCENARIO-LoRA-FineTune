@@ -12,26 +12,27 @@ target_modules: [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]
 bias: "none"
 
 # Quantizzazione
-load_in_4bit: false
-torch_dtype: float64
+load_in_4bit: true
+torch_dtype: bfloat16
 save_safetensors: true
-#bnb_4bit_quant_type: "nf4"
-#bnb_4bit_use_double_quant: true
-#bnb_4bit_compute_dtype: "bfloat16"
+bnb_4bit_quant_type: "nf4"
+bnb_4bit_use_double_quant: true
+bnb_4bit_compute_dtype: "bfloat16"
 
 # Training
 max_length: 3072
 train_batch_size: 1
-grad_accum_steps: 16
+grad_accum_steps: 8
 eval_batch_size: 1
 learning_rate: 2.0e-4
 weight_decay: 0.0
 num_epochs: 2
 warmup_ratio: 0.05
 lr_scheduler_type: cosine
-logging_steps: 10
-eval_steps: 200
-save_steps: 1000
+logging_steps: 20
+eval_steps: 400
+save_steps: 50
+save_total_limit: 3
 gradient_checkpointing: true
 packing: false
 
@@ -43,7 +44,7 @@ hub_model_id: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
 gen_max_new_tokens: 4000
 gen_temperature: 0.3
 gen_top_p: 0.9
-stop_sequence: "</OpenSCENARIO>"
+stop_sequence: "</OpenScenario>"
 
 # Valutazione (slot & XSD)
 xsd_path: ""   # inserisci il percorso a OpenSCENARIO.xsd se ce l'hai, altrimenti lascialo vuoto
