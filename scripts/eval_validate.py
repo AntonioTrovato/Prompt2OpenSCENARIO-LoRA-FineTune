@@ -387,6 +387,7 @@ def main():
     split = ds.train_test_split(test_size=0.1, seed=42)
     subset = split["test"] if args.split == "validation" else split["train"]
     if args.limit:
+        subset = subset.shuffle(seed=42)
         subset = subset.select(range(min(args.limit, len(subset))))
 
     preds, golds, rows = [], [], []
