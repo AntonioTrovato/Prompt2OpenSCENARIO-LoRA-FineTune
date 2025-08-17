@@ -1,4 +1,6 @@
 import os, json, argparse, re
+
+import torch
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
@@ -292,6 +294,7 @@ def generate(model, tok, prompt, max_new_tokens, temperature, top_p):
     out = model.generate(
         **enc,
         max_new_tokens=max_new_tokens,
+        do_sample = True,
         temperature=temperature,
         top_p=top_p,
         pad_token_id=tok.pad_token_id,
@@ -325,10 +328,10 @@ def main():
 
     # Carica il tokenizer dalla repo LoRA (così prendi anche chat_template.jinja)
     try:
-        tok = AutoTokenizer.from_pretrained(args.lora_repo, use_fast=False)
+        tok = AutoTokenizer.from_pretrained(args.lora_repo, use_fast=True)
     except Exception:
         # fallback al base model se la LoRA non contiene il tokenizer
-        tok = AutoTokenizer.from_pretrained(args.base_model, use_fast=False)
+        tok = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
 
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -340,7 +343,7 @@ def main():
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype="bfloat16",  # ok anche float16 se preferisci
+        bnb_4bit_compute_dtype=torch.bfloat16,  # ok anche float16 se preferisci
     )
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -359,9 +362,8 @@ def main():
     sys_tmpl = open(args.sys_template, "r", encoding="utf-8").read()
 
     ds = load_dataset(args.hf_dataset_repo, split="train")
-    # split 90/10 come in train.py
-    n = len(ds); cut = int(n * 0.9)
-    subset = ds.select(range(cut, n)) if args.split == "validation" else ds.select(range(0, cut))
+    split = ds.train_test_split(test_size=0.1, seed=42)
+    subset = split["test"] if args.split == "validation" else split["train"]
     if args.limit:
         subset = subset.select(range(min(args.limit, len(subset))))
 
@@ -369,7 +371,9 @@ def main():
     bleu_refs, bleu_hyps = [], []
     rouge = RougeScorer(["rougeL"], use_stemmer=True)
 
-    for ex in subset:
+    total = len(subset)
+
+    for i, ex in enumerate(subset, start=1):
         gold_full = ex["assistant"].strip()
         # gold ridotto secondo policy scelta (coerente col training)
         gold = reduce_gold(gold_full, args.reduce_gold)
@@ -440,6 +444,9 @@ def main():
         })
 
         preds.append(pred); golds.append(gold)
+
+        if i % 5 == 0:  # stampa ogni volta
+            print(f"{i}/{total}", flush=True)
 
     refs = list(map(list, zip(*bleu_refs))) if bleu_refs else [[]]
     bleu = sacrebleu.corpus_bleu(bleu_hyps, refs)

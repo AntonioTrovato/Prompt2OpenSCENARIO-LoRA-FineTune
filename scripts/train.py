@@ -129,7 +129,7 @@ def build_minimal_xosc_from_features(feat: dict) -> str:
         return p["x"], p["y"], p["z"], p["h"]
 
     E = etree.Element
-    root = E("OpenSCENARIO")
+    root = E("OpenScenario")
 
     fh = E("FileHeader", revMajor="1", revMinor="0", date="2025-01-01T00:00:00", description="Minimal scenario")
     root.append(fh)
