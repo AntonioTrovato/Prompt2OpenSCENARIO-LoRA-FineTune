@@ -334,10 +334,18 @@ def main():
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"  # allineato al training
 
-    # Modello: base + adapter LoRA
+    from transformers import BitsAndBytesConfig
+
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype="bfloat16",  # ok anche float16 se preferisci
+    )
+
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
-        torch_dtype="auto",
+        quantization_config=bnb,
         device_map="auto",
         low_cpu_mem_usage=True,
     )
