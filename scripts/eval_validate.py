@@ -6,9 +6,206 @@ from lxml import etree
 from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 import sacrebleu
 from rouge_score.rouge_scorer import RougeScorer
+import xml.etree.ElementTree as ET
 
 # Usa l'estrattore definito in train (stessa logica delle feature)
-from scripts.train import extract_features_from_xosc, minify_xml, build_minimal_xosc_from_features
+#from scripts.train import extract_features_from_xosc, minify_xml, build_minimal_xosc_from_features
+# ---------------------------
+# Feature extractor (fornita)
+# ---------------------------
+def extract_features_from_xosc(xosc_text: str) -> dict:
+    feat = {
+        "map": None,
+        "time_of_day": None,
+        "weather": {"cloud_state": None, "precipitation": None, "fog": None, "wind": None},
+        "speed_limits": [],
+        "entities": [],
+        "initial_positions": [],
+        "events": [],
+        "notes": []
+    }
+    try:
+        root = ET.fromstring(xosc_text)
+    except Exception:
+        feat["notes"].append("xml_parse_failed")
+        return feat
+
+    rn = root.find(".//RoadNetwork/LogicFile")
+    if rn is not None:
+        feat["map"] = rn.attrib.get("filepath") or rn.attrib.get("file") or None
+
+    tod = root.find(".//Environment/TimeOfDay")
+    if tod is not None:
+        feat["time_of_day"] = tod.attrib.get("dateTime") or tod.attrib.get("animation") or None
+
+    w = root.find(".//Environment/Weather")
+    if w is not None:
+        feat["weather"]["cloud_state"] = w.attrib.get("cloudState")
+        feat["weather"]["precipitation"] = w.attrib.get("precipitationType") or w.attrib.get("precipitation")
+        fog = w.find(".//Fog")
+        if fog is not None:
+            feat["weather"]["fog"] = fog.attrib.get("visualRange")
+        wind = w.find(".//Wind")
+        if wind is not None:
+            feat["weather"]["wind"] = wind.attrib.get("direction") or wind.attrib.get("speed")
+
+    for sl in root.findall(".//SpeedLimitAction") + root.findall(".//SpeedAction"):
+        maxkph = sl.attrib.get("max") or sl.attrib.get("target")
+        if maxkph:
+            feat["speed_limits"].append(maxkph)
+
+    for ent in root.findall(".//Entities/*"):
+        tag = ent.tag.lower()
+        name = ent.attrib.get("name") or ent.attrib.get("nameRef")
+        etype = "vehicle"
+        if "pedestrian" in tag:
+            etype = "pedestrian"
+        elif "misc" in tag:
+            etype = "misc"
+        if name:
+            feat["entities"].append({"name": name, "type": etype})
+
+    for priv in root.findall(".//Init/Actions/Private"):
+        name = priv.attrib.get("entityRef")
+        wp = priv.find(".//WorldPosition")
+        if wp is not None:
+            feat["initial_positions"].append({
+                "entity": name,
+                "x": wp.attrib.get("x"), "y": wp.attrib.get("y"),
+                "z": wp.attrib.get("z"), "h": wp.attrib.get("h")
+            })
+
+    for ev in root.findall(".//Storyboard//Event"):
+        ev_name = ev.attrib.get("name")
+        act = ev.find(".//Action")
+        trig = ev.find(".//StartTrigger") or ev.find(".//ConditionGroup")
+        desc = []
+        if ev_name: desc.append(ev_name)
+        if trig is not None:
+            for cond in trig.findall(".//ByValueCondition/SimulationTimeCondition"):
+                delay = cond.attrib.get("value")
+                if delay:
+                    desc.append(f"after {delay}s")
+        if act is not None:
+            atag = next((c.tag for c in list(act) if isinstance(c.tag, str)), None)
+            if atag:
+                desc.append(atag)
+        if desc:
+            feat["events"].append(" ".join(desc))
+    return feat
+
+# ---------------------------------
+# Riduzione on-the-fly dell'XML gold
+# ---------------------------------
+def minify_xml(x: str) -> str:
+    try:
+        parser = etree.XMLParser(remove_blank_text=True, remove_comments=True)
+        root = etree.fromstring(x.encode("utf-8"), parser=parser)
+        return etree.tostring(root, encoding="unicode", pretty_print=False)
+    except Exception:
+        return x
+
+def build_minimal_xosc_from_features(feat: dict) -> str:
+    # Fallbacks
+    map_path = feat.get("map") or "Town01.xodr"
+    time_of_day = feat.get("time_of_day") or "2025-01-01T12:00:00"
+    weather = feat.get("weather") or {}
+    cloud = weather.get("cloud_state") or "free"
+    precip = weather.get("precipitation") or "dry"
+
+    entities = feat.get("entities") or []
+    if not entities:
+        entities = [{"name": "ego", "type": "vehicle"}]
+
+    init_pos_by_entity = {}
+    for ip in (feat.get("initial_positions") or []):
+        init_pos_by_entity[ip.get("entity")] = {
+            "x": ip.get("x") or "0", "y": ip.get("y") or "0",
+            "z": ip.get("z") or "0", "h": ip.get("h") or "0"
+        }
+
+    def mk_pos(name):
+        p = init_pos_by_entity.get(name) or {"x":"0","y":"0","z":"0","h":"0"}
+        return p["x"], p["y"], p["z"], p["h"]
+
+    E = etree.Element
+    root = E("OpenScenario")
+
+    fh = E("FileHeader", revMajor="1", revMinor="0", date="2025-01-01T00:00:00", description="Minimal scenario")
+    root.append(fh)
+
+    rn = E("RoadNetwork")
+    rn.append(E("LogicFile", filepath=map_path))
+    root.append(rn)
+
+    root.append(E("ParameterDeclarations"))
+    root.append(E("CatalogLocations"))
+
+    ents = E("Entities")
+    for ent in entities:
+        nm = ent.get("name") or "ego"
+        typ = ent.get("type") or "vehicle"
+        if typ == "pedestrian":
+            obj = E("Pedestrian", name=nm)
+        elif typ == "misc":
+            obj = E("MiscObject", name=nm)
+        else:
+            obj = E("Vehicle", name=nm)
+        ents.append(obj)
+    root.append(ents)
+
+    sb = E("Storyboard")
+
+    init = E("Init")
+    actions = E("Actions")
+    for ent in entities:
+        nm = ent.get("name") or "ego"
+        priv = E("Private", entityRef=nm)
+        actions_priv = E("Actions")
+        act = E("Action")
+        tp = E("TeleportAction")
+        pos = E("Position")
+        x,y,z,h = mk_pos(nm)
+        pos.append(E("WorldPosition", x=x, y=y, z=z, h=h))
+        tp.append(pos)
+        act.append(tp)
+        actions_priv.append(act)
+        priv.append(actions_priv)
+        actions.append(priv)
+    init.append(actions)
+    sb.append(init)
+
+    story = E("Story", name="main_story")
+    act = E("Act", name="act_1")
+    for ent in entities:
+        nm = ent.get("name") or "ego"
+        mg = E("ManeuverGroup", name=f"mg_{nm}")
+        man = E("Maneuver", name=f"man_{nm}")
+        ev = E("Event", name=f"ev_{nm}", priority="overwrite")
+        ev_action = E("Action")
+        ev_action.append(E("ControllerAction"))
+        ev.append(ev_action)
+        st = E("StartTrigger")
+        cg = E("ConditionGroup")
+        c = E("Condition", delay="0", conditionEdge="rising")
+        byv = E("ByValueCondition")
+        byv.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
+        c.append(byv); cg.append(c); st.append(c)
+        ev.append(st)
+        man.append(ev); mg.append(man)
+        act.append(mg)
+    st_act = E("StartTrigger")
+    cg_act = E("ConditionGroup")
+    c_act = E("Condition", delay="0", conditionEdge="rising")
+    byv_act = E("ByValueCondition")
+    byv_act.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
+    c_act.append(byv_act); cg_act.append(c_act); st_act.append(c_act)
+    act.append(st_act)
+    story.append(act)
+    sb.append(story)
+    root.append(sb)
+
+    return etree.tostring(root, encoding="unicode", pretty_print=False)
 
 # Opzionali
 try:
@@ -101,13 +298,13 @@ def generate(model, tok, prompt, max_new_tokens, temperature, top_p):
         eos_token_id=tok.eos_token_id
     )
     txt = tok.decode(out[0], skip_special_tokens=True)
-    m = re.search(r"<OpenSCENARIO\b.*</OpenSCENARIO>", txt, flags=re.DOTALL)
+    m = re.search(r"<OpenScenario\b.*</OpenScenario>", txt, flags=re.DOTALL)
     if m:
         return m.group(0).strip()
     # fallback: prendi dal prompt in poi
     rest = txt.split(prompt)[-1].strip()
-    if "</OpenSCENARIO>" in rest:
-        return rest.split("</OpenSCENARIO>")[0].strip() + "</OpenSCENARIO>"
+    if "</OpenScenario>" in rest:
+        return rest.split("</OpenScenario>")[0].strip() + "</OpenScenario>"
     return rest
 
 def main():
@@ -173,7 +370,7 @@ def main():
                 "has_weather": any(v for v in (s.get("weather") or {}).values() if v),
                 "veh_ge1": sum(1 for e in s.get("entities", []) if e.get("type") != "pedestrian") >= 1,
                 "veh_ge2": sum(1 for e in s.get("entities", []) if e.get("type") != "pedestrian") >= 2,
-                "ends_close": closing_text.strip().endswith("</OpenSCENARIO>")
+                "ends_close": closing_text.strip().endswith("</OpenScenario>")
             }
         p_bools, g_bools = slots_to_bools(p_slots, pred), slots_to_bools(g_slots, gold)
         prec, rec, f1, acc = bool_f1(g_bools, p_bools)

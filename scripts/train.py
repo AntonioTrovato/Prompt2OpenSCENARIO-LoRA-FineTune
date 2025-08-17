@@ -405,9 +405,7 @@ def main():
     tok.save_pretrained(cfg["output_dir"])
 
     if cfg.get("push_to_hub", False):
-        repo_id = cfg.get("hub_model_id") or cfg["hf_model_repo"]
-        trainer.push_to_hub(repo_id=repo_id, commit_message="Upload LoRA adapters")
-        print(f"Adapters pushed to https://huggingface.co/{repo_id}")
+        trainer.push_to_hub(commit_message="Upload LoRA adapters")
 
 if __name__ == "__main__":
     main()
