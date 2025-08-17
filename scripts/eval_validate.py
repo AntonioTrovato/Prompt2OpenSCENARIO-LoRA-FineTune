@@ -1,14 +1,25 @@
 import os, json, argparse, re
+import time
 
 import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
 from peft import PeftModel
 from lxml import etree
 from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 import sacrebleu
 from rouge_score.rouge_scorer import RougeScorer
 import xml.etree.ElementTree as ET
+
+class StopOnSequence(StoppingCriteria):
+    def __init__(self, stop_ids):
+        super().__init__()
+        self.stop_ids = stop_ids
+        self.k = len(stop_ids)
+    def __call__(self, input_ids, scores, **kwargs):
+        if input_ids.shape[1] < self.k:
+            return False
+        return (input_ids[0, -self.k:].tolist() == self.stop_ids)
 
 # Usa l'estrattore definito in train (stessa logica delle feature)
 #from scripts.train import extract_features_from_xosc, minify_xml, build_minimal_xosc_from_features
@@ -245,7 +256,12 @@ def bool_f1(y_true, y_pred):
     keys = sorted(set(y_true.keys()) | set(y_pred.keys()))
     yt = [bool(y_true.get(k, False)) for k in keys]
     yp = [bool(y_pred.get(k, False)) for k in keys]
-    return (precision_score(yt, yp), recall_score(yt, yp), f1_score(yt, yp), accuracy_score(yt, yp))
+    return (
+        precision_score(yt, yp, zero_division=0),
+        recall_score(yt, yp, zero_division=0),
+        f1_score(yt, yp, zero_division=0),
+        accuracy_score(yt, yp),
+    )
 
 def xml_ok(x):
     try:
@@ -288,18 +304,21 @@ def build_prompt(sys_tmpl: str, system: str, user: str, gold_assistant: str, use
         prompt += "\n"
     return prompt
 
-def generate(model, tok, prompt, max_new_tokens, temperature, top_p):
+def generate(model, tok, prompt, max_new_tokens, temperature, top_p, stops):
     enc = tok(prompt, return_tensors="pt")
     enc = {k: v.to(model.device) for k, v in enc.items()}
-    out = model.generate(
-        **enc,
-        max_new_tokens=max_new_tokens,
-        do_sample = True,
-        temperature=temperature,
-        top_p=top_p,
-        pad_token_id=tok.pad_token_id,
-        eos_token_id=tok.eos_token_id
-    )
+
+    with torch.inference_mode():            # <<< qui
+        out = model.generate(
+            **enc,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=temperature,
+            top_p=top_p,
+            pad_token_id=tok.pad_token_id,
+            eos_token_id=tok.eos_token_id,
+            stopping_criteria=stops,
+        )
     txt = tok.decode(out[0], skip_special_tokens=True)
     m = re.search(r"<OpenScenario\b.*</OpenScenario>", txt, flags=re.DOTALL)
     if m:
@@ -321,7 +340,7 @@ def main():
     ap.add_argument("--sys_template", default="prompt_templates/codellama_inst.txt")
     ap.add_argument("--use_feature_hints", action="store_true")
     ap.add_argument("--reduce_gold", choices=["none","minify_only","features_skeleton"], default="minify_only")
-    ap.add_argument("--gen_max_new_tokens", type=int, default=4000)
+    ap.add_argument("--gen_max_new_tokens", type=int, default=3072)
     ap.add_argument("--gen_temperature", type=float, default=0.3)
     ap.add_argument("--gen_top_p", type=float, default=0.9)
     args = ap.parse_args()
@@ -336,6 +355,9 @@ def main():
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"  # allineato al training
+
+    stop_ids = tok("</OpenScenario>", add_special_tokens=False).input_ids
+    stops = StoppingCriteriaList([StopOnSequence(stop_ids)])
 
     from transformers import BitsAndBytesConfig
 
@@ -372,6 +394,7 @@ def main():
     rouge = RougeScorer(["rougeL"], use_stemmer=True)
 
     total = len(subset)
+    t0 = time.time()
 
     for i, ex in enumerate(subset, start=1):
         gold_full = ex["assistant"].strip()
@@ -379,7 +402,7 @@ def main():
         gold = reduce_gold(gold_full, args.reduce_gold)
 
         prompt = build_prompt(sys_tmpl, ex["system"], ex["user"], gold_full, args.use_feature_hints)
-        pred = generate(model, tok, prompt, args.gen_max_new_tokens, args.gen_temperature, args.gen_top_p)
+        pred = generate(model, tok, prompt, args.gen_max_new_tokens, args.gen_temperature, args.gen_top_p, stops)
 
         # Metriche base
         well_pred, _ = xml_ok(pred)
@@ -445,8 +468,10 @@ def main():
 
         preds.append(pred); golds.append(gold)
 
-        if i % 5 == 0:  # stampa ogni volta
-            print(f"{i}/{total}", flush=True)
+        if True:
+            avg = (time.time() - t0) / i
+            eta = avg * (total - i)
+            print(f"{i}/{total}  avg={avg:.1f}s/it  ETA={eta/60:.1f}m", flush=True)
 
     refs = list(map(list, zip(*bleu_refs))) if bleu_refs else [[]]
     bleu = sacrebleu.corpus_bleu(bleu_hyps, refs)
