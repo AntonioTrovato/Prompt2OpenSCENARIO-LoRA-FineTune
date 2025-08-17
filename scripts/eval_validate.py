@@ -323,12 +323,30 @@ def main():
     ap.add_argument("--gen_top_p", type=float, default=0.9)
     args = ap.parse_args()
 
-    tok = AutoTokenizer.from_pretrained(args.base_model, use_fast=False)
+    # Carica il tokenizer dalla repo LoRA (così prendi anche chat_template.jinja)
+    try:
+        tok = AutoTokenizer.from_pretrained(args.lora_repo, use_fast=False)
+    except Exception:
+        # fallback al base model se la LoRA non contiene il tokenizer
+        tok = AutoTokenizer.from_pretrained(args.base_model, use_fast=False)
+
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.base_model, torch_dtype="auto", device_map="auto")
+    tok.padding_side = "right"  # allineato al training
+
+    # Modello: base + adapter LoRA
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        torch_dtype="auto",
+        device_map="auto",
+        low_cpu_mem_usage=True,
+    )
     model = PeftModel.from_pretrained(model, args.lora_repo)
     model.eval()
+
+    # Allinea gli id per la generazione (alcuni modelli ne hanno di diversi)
+    model.config.pad_token_id = tok.pad_token_id
+    model.config.eos_token_id = tok.eos_token_id
 
     sys_tmpl = open(args.sys_template, "r", encoding="utf-8").read()
 
