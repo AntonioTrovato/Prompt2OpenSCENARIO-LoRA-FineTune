@@ -25,7 +25,7 @@ class StopOnString(StoppingCriteria):
 # Opzione B: VRAM limitata, tutto GPU in 4-bit
 bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                          bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
-tok = AutoTokenizer.from_pretrained(BASE, use_fast=True)
+tok = AutoTokenizer.from_pretrained(LORA, use_fast=True)
 tok.padding_side="right"
 if tok.pad_token is None: tok.pad_token = tok.eos_token
 model = AutoModelForCausalLM.from_pretrained(
@@ -39,7 +39,7 @@ model.eval()
 # warm-up (facoltativo ma utile)
 #_ = model.generate(**tok("Hi", return_tensors="pt").to(model.device), max_new_tokens=8)
 
-def generate_xosc(system: str, user: str, max_new: int = 1500) -> str:
+def generate_xosc(system: str, user: str, max_new: int = 4000) -> str:
     tmpl = open(TEMPLATE, "r", encoding="utf-8").read()
     prompt = tmpl.format(system=system, user=user)
     if prompt.endswith("[/INST]"): prompt += "\n"
@@ -48,15 +48,17 @@ def generate_xosc(system: str, user: str, max_new: int = 1500) -> str:
         out = model.generate(
             **enc,
             max_new_tokens=max_new,
-            do_sample=False, temperature=0.1, top_p=0.9,
+            do_sample=False,
             pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id,
-            stopping_criteria=StoppingCriteriaList([StopOnString(tok, STOP_STR)])
+            stopping_criteria=StoppingCriteriaList([StopOnString(tok, STOP_STR)]),
+            return_dict_in_generate = True
         )
-    txt = tok.decode(out[0], skip_special_tokens=True)
+    gen_ids = out.sequences[0, enc["input_ids"].shape[1]:]
+    txt = tok.decode(gen_ids, skip_special_tokens=True)
     m = re.search(r"<OpenScenario\b.*</OpenScenario>", txt, flags=re.DOTALL)
-    return m.group(0) if m else txt
+    return m.group(0).strip() if m else txt
 
 # esempio
-system = "Act as an OpenSCENARIO 1.0 generator for ADS testing in CARLA. I will give you a scene description in English and you must return one valid `.xosc` file, XML only, encoded in UTF-8, starting with `<OpenScenario>` and ending with `</OpenScenario>`. The file must be deterministic, schema-compliant, and executable in CARLA without modifications. It must always specify the map, time of day, weather, any speed limits, all entities with unique names, their initial positions, and the storyboard with relevant events and triggers. Use realistic defaults if details are missing, but never omit these features. No comments or extra text, only the `.xosc`."
-user = "On the ARG_Carcarana-10_1_T-1 road network at noon on 2023-03-20, the scene runs under clear skies with essentially no fog (very long visibility). The ego car starts at (21.56, 91.14, h≈-1.034) while NPC vehicles are preplaced at, for example, Npc31 (-3.07, 93.26, h≈-0.206), Npc32 (64.81, 82.66, h≈-3.347), Npc38 (24.53, 134.65, h≈-1.774), Npc312 (40.40, 127.22, h≈-1.743), and Npc318 (20.06, 102.29, h≈-1.774). At t=0.0 s, every NPC begins moving along its predefined trajectory. No pedestrians are present, and additional NPCs begin their paths immediately as well."
+system = "Act as an OpenSCENARIO 1.0 generator for ADS testing in CARLA. I will give you a scene description in English and you must return one valid `.xosc` file, XML only, encoded in UTF-8, starting with `<OpenScenario>` and ending with `</OpenScenario>`. The file must end with </OpenScenario> tag, be deterministic, schema-compliant, and executable in CARLA without modifications. It must always specify the map, time of day, weather, any speed limits, all entities with unique names, their initial positions, and the storyboard with relevant events and triggers. Use realistic defaults if details are missing, but never omit these features. No comments or extra text, only the `.xosc`."
+user = "Write me a small scenario OpenSCENARIO 1.0 in which you only spawn a ego vehicle and stop. Do it in Town03"
 print(generate_xosc(system, user))

@@ -1,7 +1,7 @@
 base_model: C:\Users\sesal\Documents\AntonioTrovato\CodeLlama-13b-Instruct-hf
-hf_model_repo: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
+hf_model_repo: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA_reduced
 hf_dataset_repo: anto0699/Prompt2OpenSCENARIO-LoRA-FineTune
-output_dir: runs/codellama13b-lora
+output_dir: runs/codellama13b-lora_reduced
 seed: 42
 
 # QLoRA / PEFT
@@ -38,7 +38,7 @@ packing: false # not concatenating more examples in the same batch
 
 # Hub
 push_to_hub: true # at the end, automatically pushes the adapters on the correct repo
-hub_model_id: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
+hub_model_id: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA_reduced
 
 # Generation (per validazione)
 gen_max_new_tokens: 4000 # max generated tokens
