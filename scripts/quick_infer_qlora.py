@@ -15,7 +15,8 @@ class StopOnString(StoppingCriteria):
 
 # === scegli una delle due opzioni ===
 # Opzione A: VRAM ampia, niente offload
-#tok = AutoTokenizer.from_pretrained(BASE, use_fast=False)
+#tok = AutoTokenizer.from_pretrained(BASE, use_fast=True)
+#tok.padding_side="right"
 #if tok.pad_token is None: tok.pad_token = tok.eos_token
 #model = AutoModelForCausalLM.from_pretrained(
 #    BASE, torch_dtype=torch.bfloat16, device_map={"":0}, attn_implementation="sdpa"
@@ -24,7 +25,8 @@ class StopOnString(StoppingCriteria):
 # Opzione B: VRAM limitata, tutto GPU in 4-bit
 bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                          bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
-tok = AutoTokenizer.from_pretrained(BASE, use_fast=False)
+tok = AutoTokenizer.from_pretrained(BASE, use_fast=True)
+tok.padding_side="right"
 if tok.pad_token is None: tok.pad_token = tok.eos_token
 model = AutoModelForCausalLM.from_pretrained(
     BASE, quantization_config=bnb, device_map="auto", attn_implementation="sdpa"
@@ -37,18 +39,19 @@ model.eval()
 # warm-up (facoltativo ma utile)
 #_ = model.generate(**tok("Hi", return_tensors="pt").to(model.device), max_new_tokens=8)
 
-def generate_xosc(system: str, user: str, max_new: int = 1800) -> str:
+def generate_xosc(system: str, user: str, max_new: int = 1500) -> str:
     tmpl = open(TEMPLATE, "r", encoding="utf-8").read()
     prompt = tmpl.format(system=system, user=user)
     if prompt.endswith("[/INST]"): prompt += "\n"
     enc = tok(prompt, return_tensors="pt").to(model.device)
-    out = model.generate(
-        **enc,
-        max_new_tokens=max_new,
-        do_sample=False, temperature=0.0, top_p=1.0,
-        pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id,
-        stopping_criteria=StoppingCriteriaList([StopOnString(tok, STOP_STR)])
-    )
+    with torch.inference_mode():
+        out = model.generate(
+            **enc,
+            max_new_tokens=max_new,
+            do_sample=False, temperature=0.1, top_p=0.9,
+            pad_token_id=tok.pad_token_id, eos_token_id=tok.eos_token_id,
+            stopping_criteria=StoppingCriteriaList([StopOnString(tok, STOP_STR)])
+        )
     txt = tok.decode(out[0], skip_special_tokens=True)
     m = re.search(r"<OpenScenario\b.*</OpenScenario>", txt, flags=re.DOTALL)
     return m.group(0) if m else txt

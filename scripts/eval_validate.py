@@ -369,7 +369,7 @@ def main():
     ap.add_argument("--sys_template", default="prompt_templates/codellama_inst.txt")
     ap.add_argument("--use_feature_hints", action="store_true")
     ap.add_argument("--reduce_gold", choices=["none","minify_only","features_skeleton"], default="minify_only")
-    ap.add_argument("--gen_max_new_tokens", type=int, default=2000)
+    ap.add_argument("--gen_max_new_tokens", type=int, default=1500)
     ap.add_argument("--gen_temperature", type=float, default=0.1)
     ap.add_argument("--gen_top_p", type=float, default=0.9)
     args = ap.parse_args()
