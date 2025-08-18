@@ -5,47 +5,47 @@ output_dir: runs/codellama13b-lora
 seed: 42
 
 # QLoRA / PEFT
-lora_r: 32
-lora_alpha: 32
-lora_dropout: 0.05
-target_modules: [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]
-bias: "none"
+lora_r: 32 # rank of additive LoRA layers (the higher, the higher the VRAM usage)
+lora_alpha: 32 #LoRA weights scaling
+lora_dropout: 0.05 # layers' dropout to avoid overfitting
+target_modules: [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj] #adapting attention and MLP model's projections
+bias: "none" # not updating or adding any bias terms
 
 # Quantizzazione
-load_in_4bit: true
-torch_dtype: bfloat16
-save_safetensors: true
-bnb_4bit_quant_type: "nf4"
-bnb_4bit_use_double_quant: true
-bnb_4bit_compute_dtype: "bfloat16"
+load_in_4bit: true # using 4-bit model
+torch_dtype: bfloat16 # the gradients/activations computations happen in bf16 (more stable than (fp16)
+save_safetensors: true # safe save of weights
+bnb_4bit_quant_type: "nf4" # nf4 quantization
+bnb_4bit_use_double_quant: true # double quantization to further reduce the memory usage
+bnb_4bit_compute_dtype: "bfloat16" # coherent with torch_dtype
 
 # Training
-max_length: 3072
+max_length: 3072 #max token length for training
 train_batch_size: 1
-grad_accum_steps: 8
-eval_batch_size: 1
-learning_rate: 2.0e-4
-weight_decay: 0.0
-num_epochs: 2
-warmup_ratio: 0.05
-lr_scheduler_type: cosine
-logging_steps: 20
-eval_steps: 400
-save_steps: 50
-save_total_limit: 3
-gradient_checkpointing: true
-packing: false
+grad_accum_steps: 8 # train_batch_size: 1 + grad_accum_steps: 8 -> actual batch 1*8
+eval_batch_size: 1 # good evaluation for memory
+learning_rate: 2.0e-4 # typical for LoRA on 13B; if is overfitting, it can go to 1e-4
+weight_decay: 0.0 # ok for instruction-tuning of LoRA
+num_epochs: 2 # 2 passages on the test dataset
+warmup_ratio: 0.05 # first 5% of steps with gradual increasing of LR
+lr_scheduler_type: cosine # gradual learning rate curve
+logging_steps: 20 # logs any 20 steps
+eval_steps: 200 # makes the evaluation any 200 optimization steps
+save_steps: 50 # saving a checkpoint any 500 steps
+save_total_limit: 3 # take at most 3 recent checkpoints
+gradient_checkpointing: true # reduce memory exchanging a bit of time (re-computes activations backwards)
+packing: false # not concatenating more examples in the same batch
 
 # Hub
-push_to_hub: true
+push_to_hub: true # at the end, automatically pushes the adapters on the correct repo
 hub_model_id: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
 
 # Generation (per validazione)
-gen_max_new_tokens: 4000
-gen_temperature: 0.3
-gen_top_p: 0.9
-stop_sequence: "</OpenScenario>"
+gen_max_new_tokens: 4000 # max generated tokens
+gen_temperature: 0.1 # almost deterministic
+gen_top_p: 0.9 # almost deterministic
+stop_sequence: "</OpenScenario>" # generations stops after this tag
 
 # Valutazione (slot & XSD)
-xsd_path: ""   # inserisci il percorso a OpenSCENARIO.xsd se ce l'hai, altrimenti lascialo vuoto
-val_split_ratio: 0.1
+xsd_path: "../xsd/OpenSCENARIO.xsd" # the OpenSCENARIO 1.0 xsd path to formally validate the LLM's outputs
+val_split_ratio: 0.1 # using the 10% of the dataset for test

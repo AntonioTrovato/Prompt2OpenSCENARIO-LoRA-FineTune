@@ -219,33 +219,6 @@ def reduce_assistant(xosc_text: str, mode: str) -> str:
     # "none"
     return xosc_text
 
-# -------------------------
-# Formatting per il trainer
-# -------------------------
-def format_example(ex, sys_tmpl, stop_seq, use_feature_hints: bool, reduce_mode: str):
-    system = ex["system"].strip()
-    user = ex["user"].strip()
-    assistant = ex["assistant"].strip()
-
-    assistant_reduced = reduce_assistant(assistant, reduce_mode)
-
-    hints_block = ""
-    if use_feature_hints:
-        try:
-            feats = extract_features_from_xosc(assistant)  # dal target originale
-            hints_block = "\n\n<HINTS>\n" + json.dumps(feats, ensure_ascii=False) + "\n</HINTS>\n"
-        except Exception:
-            hints_block = ""
-
-    prompt = sys_tmpl.format(system=system, user=(user + hints_block))
-    if prompt.endswith("[/INST]"):
-        prompt = prompt + "\n"
-
-    text = prompt + assistant_reduced
-    if not assistant_reduced.strip().endswith(stop_seq):
-        text += stop_seq
-    return text
-
 # -----
 # Main
 # -----
@@ -312,16 +285,7 @@ def main():
     ds = ds.train_test_split(test_size=cfg.get("val_split_ratio", 0.1), seed=cfg["seed"])
     ds = DatasetDict({"train": ds["train"], "validation": ds["test"]})
 
-    sys_tmpl = open("prompt_templates/codellama_inst.txt", "r", encoding="utf-8").read()
     stop_seq = cfg["stop_sequence"]
-
-    def formatting_func(batch):
-        return [
-            format_example(ex, sys_tmpl, stop_seq,
-                           use_feature_hints=args.use_feature_hints,
-                           reduce_mode=args.reduce_mode)
-            for ex in batch
-        ]
 
     peft_cfg = LoraConfig(
         r=cfg["lora_r"],
@@ -403,9 +367,6 @@ def main():
 
     trainer.save_model(cfg["output_dir"])
     tok.save_pretrained(cfg["output_dir"])
-
-    if cfg.get("push_to_hub", False):
-        trainer.push_to_hub(commit_message="Upload LoRA adapters")
 
 if __name__ == "__main__":
     main()
