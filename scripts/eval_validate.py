@@ -10,6 +10,15 @@ from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_sc
 import sacrebleu
 from rouge_score.rouge_scorer import RougeScorer
 import xml.etree.ElementTree as ET
+import psutil
+import math
+from collections import Counter
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    NVML_HANDLE = pynvml.nvmlDeviceGetHandleByIndex(0)  # GPU 0
+except Exception:
+    NVML_HANDLE = None
 
 class StopOnSequence(StoppingCriteria):
     def __init__(self, stop_ids):
@@ -312,7 +321,7 @@ def generate(model, tok, prompt, max_new_tokens, temperature, top_p, stops):
         out = model.generate(
             **enc,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
+            do_sample=False,
             temperature=temperature,
             top_p=top_p,
             pad_token_id=tok.pad_token_id,
@@ -329,6 +338,26 @@ def generate(model, tok, prompt, max_new_tokens, temperature, top_p, stops):
         return rest.split("</OpenScenario>")[0].strip() + "</OpenScenario>"
     return rest
 
+def compute_ppl(model, tok, prompt: str, gold: str) -> float:
+    # Assicurati che il gold termini con il tag di chiusura (come nel training)
+    if not gold.strip().endswith("</OpenScenario>"):
+        gold = gold.strip() + "</OpenScenario>"
+
+    enc_prompt = tok(prompt, return_tensors="pt")
+    enc_full = tok(prompt + gold, return_tensors="pt")
+
+    k = enc_prompt.input_ids.shape[1]
+    input_ids = enc_full.input_ids.to(model.device)
+    attention_mask = enc_full.attention_mask.to(model.device)
+
+    labels = input_ids.clone()
+    labels[:, :k] = -100  # maschera la parte di prompt: loss solo sull'assistant
+
+    with torch.no_grad():
+        out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        loss = float(out.loss.item())
+    return loss
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base_model", default="codellama/CodeLlama-13b-Instruct-hf")
@@ -340,8 +369,8 @@ def main():
     ap.add_argument("--sys_template", default="prompt_templates/codellama_inst.txt")
     ap.add_argument("--use_feature_hints", action="store_true")
     ap.add_argument("--reduce_gold", choices=["none","minify_only","features_skeleton"], default="minify_only")
-    ap.add_argument("--gen_max_new_tokens", type=int, default=3072)
-    ap.add_argument("--gen_temperature", type=float, default=0.3)
+    ap.add_argument("--gen_max_new_tokens", type=int, default=2000)
+    ap.add_argument("--gen_temperature", type=float, default=0.1)
     ap.add_argument("--gen_top_p", type=float, default=0.9)
     args = ap.parse_args()
 
@@ -393,17 +422,28 @@ def main():
     preds, golds, rows = [], [], []
     bleu_refs, bleu_hyps = [], []
     rouge = RougeScorer(["rougeL"], use_stemmer=True)
+    gen_times, gpu_utils, vram_gbs, ram_gbs = [], [], [], []
+    ppl_losses = []
 
     total = len(subset)
     t0 = time.time()
 
+    if args.use_feature_hints:
+        print("Using features hints")
+
     for i, ex in enumerate(subset, start=1):
+
         gold_full = ex["assistant"].strip()
         # gold ridotto secondo policy scelta (coerente col training)
         gold = reduce_gold(gold_full, args.reduce_gold)
 
         prompt = build_prompt(sys_tmpl, ex["system"], ex["user"], gold_full, args.use_feature_hints)
+        t_step_start = time.time()
         pred = generate(model, tok, prompt, args.gen_max_new_tokens, args.gen_temperature, args.gen_top_p, stops)
+        gen_times.append(time.time() - t_step_start)
+
+        # Perplexity Losses
+        #ppl_losses.append(compute_ppl(model, tok, prompt, gold))
 
         # Metriche base
         well_pred, _ = xml_ok(pred)
@@ -411,9 +451,9 @@ def main():
         exact = int(pred.strip() == gold.strip())
 
         # BLEU / ROUGE
-        bleu_hyps.append(pred)
-        bleu_refs.append([gold])
-        r = rouge.score(gold, pred)["rougeL"].fmeasure
+        #bleu_hyps.append(pred)
+        #bleu_refs.append([gold])
+        #r = rouge.score(gold, pred)["rougeL"].fmeasure
 
         # Slot F1 (da feature extractor)
         p_slots, g_slots = extract_features_from_xosc(pred), extract_features_from_xosc(gold)
@@ -430,75 +470,101 @@ def main():
         prec, rec, f1, acc = bool_f1(g_bools, p_bools)
 
         # chrF++
-        chrf = sacrebleu.corpus_chrf([pred], [[gold]]).score / 100.0
+        #chrf = sacrebleu.corpus_chrf([pred], [[gold]]).score / 100.0
 
         # METEOR / BERTScore
-        meteor = None
-        if meteor_metric is not None:
-            try:
-                meteor = meteor_metric.compute(predictions=[pred], references=[gold])["meteor"]
-            except Exception:
-                meteor = None
+        #meteor = None
+        #if meteor_metric is not None:
+        #    try:
+        #        meteor = meteor_metric.compute(predictions=[pred], references=[gold])["meteor"]
+        #    except Exception:
+        #        meteor = None
 
-        bert_f1 = None
-        if bertscore is not None:
-            try:
-                bs = bertscore.compute(predictions=[pred], references=[gold], lang="en")
-                bert_f1 = float(bs["f1"][0])
-            except Exception:
-                bert_f1 = None
+        #bert_f1 = None
+        #if bertscore is not None:
+        #    try:
+        #        bs = bertscore.compute(predictions=[pred], references=[gold], lang="en")
+        #        bert_f1 = float(bs["f1"][0])
+        #    except Exception:
+        #        bert_f1 = None
 
         # Similarità/edit/jaccard/len
-        edit_sim = norm_edit_distance(pred, gold)
-        jac_tags = jaccard(extract_xml_tags(pred), extract_xml_tags(gold))
-        len_ratio = (len(pred) / len(gold)) if len(gold) else 0.0
+        #edit_sim = norm_edit_distance(pred, gold)
+        #jac_tags = jaccard(extract_xml_tags(pred), extract_xml_tags(gold))
+        #len_ratio = (len(pred) / len(gold)) if len(gold) else 0.0
 
         rows.append({
             "wellformed_pred": well_pred,
             "xsd_valid_pred": xsd_pred,
             "exact_match": exact,
-            "rougeL": r,
+            #"rougeL": r,
             "slot_precision": prec, "slot_recall": rec, "slot_f1": f1, "slot_acc": acc,
-            "chrfpp": chrf,
-            "meteor": meteor,
-            "bertscore_f1": bert_f1,
-            "edit_sim": edit_sim,
-            "jaccard_tags": jac_tags,
-            "len_ratio": len_ratio
+            #"chrfpp": chrf,
+            #"meteor": meteor,
+            #"bertscore_f1": bert_f1,
+            #"edit_sim": edit_sim,
+            #"jaccard_tags": jac_tags,
+            #"len_ratio": len_ratio
         })
 
         preds.append(pred); golds.append(gold)
+
+        if torch.cuda.is_available():
+            try:
+                if NVML_HANDLE:
+                    u = pynvml.nvmlDeviceGetUtilizationRates(NVML_HANDLE)
+                    m = pynvml.nvmlDeviceGetMemoryInfo(NVML_HANDLE)
+                    gpu_utils.append(float(u.gpu))  # %
+                    vram_gbs.append(m.used / 1e9)  # GB
+                else:
+                    vram_gbs.append(torch.cuda.memory_allocated() / 1e9)
+            except Exception:
+                pass
+        ram_gbs.append(psutil.Process().memory_info().rss / 1e9)
 
         if True:
             avg = (time.time() - t0) / i
             eta = avg * (total - i)
             print(f"{i}/{total}  avg={avg:.1f}s/it  ETA={eta/60:.1f}m", flush=True)
 
-    refs = list(map(list, zip(*bleu_refs))) if bleu_refs else [[]]
-    bleu = sacrebleu.corpus_bleu(bleu_hyps, refs)
+    #refs = list(map(list, zip(*bleu_refs))) if bleu_refs else [[]]
+    #bleu = sacrebleu.corpus_bleu(bleu_hyps, refs)
 
     import numpy as np
     def mean(key):
         vals = [row[key] for row in rows if row[key] is not None]
         return float(np.nanmean(vals)) if vals else 0.0
 
+    total_gen_time = float(np.sum(gen_times)) if gen_times else 0.0
+    throughput_scen_per_s = (len(gen_times) / total_gen_time) if total_gen_time > 0 else None
+    throughput_scen_per_min = (throughput_scen_per_s * 60.0) if throughput_scen_per_s else None
+
+    #avg_ppl = math.exp(float(np.mean(ppl_losses))) if ppl_losses else None
+
     metrics = {
         "count": len(rows),
         "xml_wellformed_rate": mean("wellformed_pred"),
         "xsd_valid_rate": mean("xsd_valid_pred") if args.xsd_path else None,
         "exact_match": mean("exact_match"),
-        "bleu": float(bleu.score),
-        "rougeL_f1": mean("rougeL"),
-        "chrfpp": mean("chrfpp"),
-        "meteor": mean("meteor"),
-        "bertscore_f1": mean("bertscore_f1"),
+        #"perplexity": avg_ppl,
+        #"bleu": float(bleu.score),
+        #"rougeL_f1": mean("rougeL"),
+        #"chrfpp": mean("chrfpp"),
+        #"meteor": mean("meteor"),
+        #"bertscore_f1": mean("bertscore_f1"),
         "slot_precision": mean("slot_precision"),
         "slot_recall": mean("slot_recall"),
         "slot_f1": mean("slot_f1"),
         "slot_accuracy": mean("slot_acc"),
-        "edit_similarity": mean("edit_sim"),
-        "jaccard_xml_tags": mean("jaccard_tags"),
-        "length_ratio_avg": mean("len_ratio")
+        #"edit_similarity": mean("edit_sim"),
+        #"jaccard_xml_tags": mean("jaccard_tags"),
+        #"length_ratio_avg": mean("len_ratio"),
+        "avg_generation_time_s": float(np.mean(gen_times)) if gen_times else None,
+        "throughput_scen_per_s": throughput_scen_per_s,
+        "throughput_scen_per_min": throughput_scen_per_min,
+        "avg_gpu_util_percent": float(np.mean(gpu_utils)) if gpu_utils else None,
+        "avg_vram_gb": float(np.mean(vram_gbs)) if vram_gbs else None,
+        "avg_ram_gb": float(np.mean(ram_gbs)) if ram_gbs else None
     }
 
     os.makedirs("runs/eval", exist_ok=True)
