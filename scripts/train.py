@@ -10,6 +10,368 @@ import xml.etree.ElementTree as ET
 from lxml import etree
 import yaml
 
+import xml.etree.ElementTree as ET
+from typing import Optional, Dict, Any
+import re
+
+
+def reduce_xosc(input_xosc_content: str) -> str:
+    """
+    Drastically reduces an OpenSCENARIO (.xosc) file to contain ONLY essential elements:
+    - Map (RoadNetwork)
+    - Time of day
+    - Weather
+    - Speed limit
+    - Entities (at least one with "ego_vehicle" property)
+    - Initial positions
+    - Events
+    - Notes
+
+    Args:
+        input_xosc_path: Path to the input .xosc file
+        output_xosc_path: Optional path for output file. If None, returns XML string
+
+    Returns:
+        XML string of the drastically reduced scenario
+    """
+
+    # Parse the input XML
+    root = ET.fromstring(input_xosc_content)
+
+    # Create new root element with correct tag name
+    new_root = ET.Element("OpenScenario")
+
+    # 1. Minimal FileHeader (required by schema)
+    header = ET.SubElement(new_root, "FileHeader")
+    header.set("revMajor", "1")
+    header.set("revMinor", "0")
+    header.set("date", "2024-01-01T00:00:00")
+    header.set("description", "Reduced Scenario")
+    header.set("author", "Reducer")
+
+    # 2. Minimal CatalogLocations (required by schema)
+    ET.SubElement(new_root, "CatalogLocations")
+
+    # 3. Map - Extract RoadNetwork
+    road_network = root.find("RoadNetwork")
+    if road_network is not None:
+        new_root.append(_copy_element(road_network))
+    else:
+        # Minimal road network
+        rn = ET.SubElement(new_root, "RoadNetwork")
+        logic_file = ET.SubElement(rn, "LogicFile")
+        logic_file.set("filepath", "map.xodr")
+
+    # 4. Entities - Keep only essential ones, ensure ego exists
+    entities = root.find("Entities")
+    new_entities = ET.SubElement(new_root, "Entities")
+
+    ego_found = False
+    if entities is not None:
+        for scenario_obj in entities.findall("ScenarioObject"):
+            if _is_ego_vehicle(scenario_obj) or _is_essential_entity(scenario_obj):
+                new_entities.append(_copy_element(scenario_obj))
+                if _is_ego_vehicle(scenario_obj):
+                    ego_found = True
+
+    # Create ego if not found
+    if not ego_found:
+        ego_obj = _create_minimal_ego_vehicle()
+        new_entities.append(ego_obj)
+
+    # 5. Minimal Storyboard with only essentials
+    storyboard = ET.SubElement(new_root, "Storyboard")
+
+    # Init section
+    init = ET.SubElement(storyboard, "Init")
+    init_actions = ET.SubElement(init, "Actions")
+
+    # Environment with time of day, weather, speed limit
+    _add_minimal_environment(init_actions)
+
+    # Initial positions
+    _add_initial_positions(init_actions, new_entities)
+
+    # Extract and add only essential events
+    _add_essential_events(storyboard, root)
+
+    # Simple stop trigger
+    _add_stop_trigger(storyboard)
+
+    # Format XML
+    _indent_xml(new_root)
+    xml_string = ET.tostring(new_root, encoding='unicode')
+    xml_string = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_string
+
+    return xml_string
+
+
+def _copy_element(element: ET.Element) -> ET.Element:
+    """Deep copy an XML element"""
+    new_elem = ET.Element(element.tag, element.attrib)
+    new_elem.text = element.text
+    new_elem.tail = element.tail
+
+    for child in element:
+        new_elem.append(_copy_element(child))
+
+    return new_elem
+
+
+def _is_ego_vehicle(scenario_obj: ET.Element) -> bool:
+    """Check if scenario object is ego vehicle"""
+    name = scenario_obj.get("name", "").lower()
+    if "ego" in name:
+        return True
+
+    # Check properties
+    properties = scenario_obj.find(".//Properties")
+    if properties is not None:
+        for prop in properties.findall("Property"):
+            prop_name = prop.get("name", "").lower()
+            prop_value = prop.get("value", "").lower()
+            if "ego" in prop_name or "ego" in prop_value:
+                return True
+
+    return False
+
+
+def _is_essential_entity(scenario_obj: ET.Element) -> bool:
+    """Check if entity is essential to keep"""
+    name = scenario_obj.get("name", "").lower()
+    # Keep entities that might be important for events
+    essential_keywords = ["target", "leader", "follower", "obstacle"]
+    return any(keyword in name for keyword in essential_keywords)
+
+
+def _create_minimal_ego_vehicle() -> ET.Element:
+    """Create minimal ego vehicle"""
+    ego_obj = ET.Element("ScenarioObject")
+    ego_obj.set("name", "ego_vehicle")
+
+    vehicle = ET.SubElement(ego_obj, "Vehicle")
+    vehicle.set("name", "ego_vehicle")
+    vehicle.set("vehicleCategory", "car")
+
+    # Minimal bounding box
+    bbox = ET.SubElement(vehicle, "BoundingBox")
+    center = ET.SubElement(bbox, "Center")
+    center.set("x", "1.5")
+    center.set("y", "0.0")
+    center.set("z", "0.9")
+    dimensions = ET.SubElement(bbox, "Dimensions")
+    dimensions.set("width", "2.0")
+    dimensions.set("length", "5.0")
+    dimensions.set("height", "1.8")
+
+    # Minimal performance
+    performance = ET.SubElement(vehicle, "Performance")
+    performance.set("maxSpeed", "50.0")
+    performance.set("maxAcceleration", "10.0")
+    performance.set("maxDeceleration", "10.0")
+
+    # Minimal axles
+    axles = ET.SubElement(vehicle, "Axles")
+    front_axle = ET.SubElement(axles, "FrontAxle")
+    front_axle.set("maxSteering", "0.5")
+    front_axle.set("wheelDiameter", "0.6")
+    front_axle.set("trackWidth", "1.8")
+    front_axle.set("positionX", "3.1")
+    front_axle.set("positionZ", "0.3")
+
+    rear_axle = ET.SubElement(axles, "RearAxle")
+    rear_axle.set("maxSteering", "0.0")
+    rear_axle.set("wheelDiameter", "0.6")
+    rear_axle.set("trackWidth", "1.8")
+    rear_axle.set("positionX", "0.0")
+    rear_axle.set("positionZ", "0.3")
+
+    # Properties with ego marker
+    properties = ET.SubElement(vehicle, "Properties")
+    ego_prop = ET.SubElement(properties, "Property")
+    ego_prop.set("name", "ego_vehicle")
+    ego_prop.set("value", "true")
+
+    return ego_obj
+
+
+def _add_minimal_environment(init_actions: ET.Element):
+    """Add minimal environment with time of day, weather, speed limit"""
+    global_action = ET.SubElement(init_actions, "GlobalAction")
+    env_action = ET.SubElement(global_action, "EnvironmentAction")
+    environment = ET.SubElement(env_action, "Environment")
+    environment.set("name", "Environment")
+
+    # Time of day
+    time_of_day = ET.SubElement(environment, "TimeOfDay")
+    time_of_day.set("animation", "false")
+    time_of_day.set("dateTime", "2024-07-15T12:00:00")
+
+    # Weather
+    weather = ET.SubElement(environment, "Weather")
+    weather.set("cloudState", "free")
+
+    sun = ET.SubElement(weather, "Sun")
+    sun.set("intensity", "1.0")
+    sun.set("azimuth", "0.0")
+    sun.set("elevation", "1.31")
+
+    fog = ET.SubElement(weather, "Fog")
+    fog.set("visualRange", "100000.0")
+
+    precipitation = ET.SubElement(weather, "Precipitation")
+    precipitation.set("precipitationType", "dry")
+    precipitation.set("intensity", "0.0")
+
+    # Road condition with speed limit
+    road_condition = ET.SubElement(environment, "RoadCondition")
+    road_condition.set("frictionScaleFactor", "1.0")
+    road_props = ET.SubElement(road_condition, "Properties")
+    speed_limit_prop = ET.SubElement(road_props, "Property")
+    speed_limit_prop.set("name", "speedLimit")
+    speed_limit_prop.set("value", "50.0")
+
+    # Notes as property
+    notes_prop = ET.SubElement(road_props, "Property")
+    notes_prop.set("name", "notes")
+    notes_prop.set("value", "Reduced scenario - essential elements only")
+
+
+def _add_initial_positions(init_actions: ET.Element, entities: ET.Element):
+    """Add initial positions for all entities"""
+    for i, scenario_obj in enumerate(entities.findall("ScenarioObject")):
+        private = ET.SubElement(init_actions, "Private")
+        private.set("entityRef", scenario_obj.get("name"))
+
+        private_action = ET.SubElement(private, "PrivateAction")
+        teleport = ET.SubElement(private_action, "TeleportAction")
+        position = ET.SubElement(teleport, "Position")
+
+        world_pos = ET.SubElement(position, "WorldPosition")
+        world_pos.set("x", str(i * 5.0))  # Spread entities apart
+        world_pos.set("y", "0.0")
+        world_pos.set("z", "0.0")
+        world_pos.set("h", "0.0")
+        world_pos.set("p", "0.0")
+        world_pos.set("r", "0.0")
+
+
+def _add_essential_events(storyboard: ET.Element, original_root: ET.Element):
+    """Extract and add only essential events"""
+    story = ET.SubElement(storyboard, "Story")
+    story.set("name", "MainStory")
+
+    act = ET.SubElement(story, "Act")
+    act.set("name", "MainAct")
+
+    maneuver_group = ET.SubElement(act, "ManeuverGroup")
+    maneuver_group.set("maximumExecutionCount", "1")
+    maneuver_group.set("name", "MainManeuverGroup")
+
+    actors = ET.SubElement(maneuver_group, "Actors")
+    actors.set("selectTriggeringEntities", "false")
+    entity_ref = ET.SubElement(actors, "EntityRef")
+    entity_ref.set("entityRef", "ego_vehicle")
+
+    # Look for existing events in original
+    existing_events = original_root.findall(".//Event")
+    if existing_events:
+        # Copy first few essential events
+        maneuver = ET.SubElement(maneuver_group, "Maneuver")
+        maneuver.set("name", "EssentialManeuver")
+
+        for i, event in enumerate(existing_events[:3]):  # Limit to first 3 events
+            new_event = _copy_element(event)
+            # Ensure event has required attributes
+            if not new_event.get("priority"):
+                new_event.set("priority", "overwrite")
+            if not new_event.get("name"):
+                new_event.set("name", f"Event_{i}")
+            maneuver.append(new_event)
+    else:
+        # Create minimal default event
+        maneuver = ET.SubElement(maneuver_group, "Maneuver")
+        maneuver.set("name", "DefaultManeuver")
+
+        event = ET.SubElement(maneuver, "Event")
+        event.set("name", "DefaultEvent")
+        event.set("priority", "overwrite")
+
+        # Simple speed action
+        action = ET.SubElement(event, "Action")
+        action.set("name", "SpeedAction")
+        private_action = ET.SubElement(action, "PrivateAction")
+        long_action = ET.SubElement(private_action, "LongitudinalAction")
+        speed_action = ET.SubElement(long_action, "SpeedAction")
+
+        dynamics = ET.SubElement(speed_action, "SpeedActionDynamics")
+        dynamics.set("dynamicsShape", "step")
+        dynamics.set("value", "1.0")
+        dynamics.set("dynamicsDimension", "time")
+
+        target = ET.SubElement(speed_action, "SpeedActionTarget")
+        abs_speed = ET.SubElement(target, "AbsoluteTargetSpeed")
+        abs_speed.set("value", "30.0")
+
+        # Start trigger
+        start_trigger = ET.SubElement(event, "StartTrigger")
+        cond_group = ET.SubElement(start_trigger, "ConditionGroup")
+        condition = ET.SubElement(cond_group, "Condition")
+        condition.set("name", "StartCondition")
+        condition.set("delay", "0")
+        condition.set("conditionEdge", "rising")
+
+        by_value = ET.SubElement(condition, "ByValueCondition")
+        sim_time = ET.SubElement(by_value, "SimulationTimeCondition")
+        sim_time.set("value", "0.0")
+        sim_time.set("rule", "greaterThan")
+
+    # Act start trigger
+    act_start_trigger = ET.SubElement(act, "StartTrigger")
+    act_cond_group = ET.SubElement(act_start_trigger, "ConditionGroup")
+    act_condition = ET.SubElement(act_cond_group, "Condition")
+    act_condition.set("name", "ActStart")
+    act_condition.set("delay", "0")
+    act_condition.set("conditionEdge", "rising")
+
+    act_by_value = ET.SubElement(act_condition, "ByValueCondition")
+    act_sim_time = ET.SubElement(act_by_value, "SimulationTimeCondition")
+    act_sim_time.set("value", "0.0")
+    act_sim_time.set("rule", "greaterThan")
+
+
+def _add_stop_trigger(storyboard: ET.Element):
+    """Add simple stop trigger"""
+    stop_trigger = ET.SubElement(storyboard, "StopTrigger")
+    cond_group = ET.SubElement(stop_trigger, "ConditionGroup")
+    condition = ET.SubElement(cond_group, "Condition")
+    condition.set("name", "StopCondition")
+    condition.set("delay", "0")
+    condition.set("conditionEdge", "rising")
+
+    by_value = ET.SubElement(condition, "ByValueCondition")
+    sim_time = ET.SubElement(by_value, "SimulationTimeCondition")
+    sim_time.set("value", "60.0")
+    sim_time.set("rule", "greaterThan")
+
+
+def _indent_xml(elem: ET.Element, level: int = 0):
+    """Add pretty-printing indentation to XML"""
+    indent = "\n" + level * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = indent + "  "
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = indent
+        for child in elem:
+            _indent_xml(child, level + 1)
+        if not child.tail or not child.tail.strip():
+            child.tail = indent
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = indent
+
+
 # ---------------------------
 # Feature extractor (fornita)
 # ---------------------------
@@ -99,9 +461,10 @@ def extract_features_from_xosc(xosc_text: str) -> dict:
 # ---------------------------------
 def minify_xml(x: str) -> str:
     try:
-        parser = etree.XMLParser(remove_blank_text=True, remove_comments=True)
-        root = etree.fromstring(x.encode("utf-8"), parser=parser)
-        return etree.tostring(root, encoding="unicode", pretty_print=False)
+        #parser = etree.XMLParser(remove_blank_text=True, remove_comments=True)
+        #root = etree.fromstring(x.encode("utf-8"), parser=parser)
+        #return etree.tostring(root, encoding="unicode", pretty_print=False)
+        return reduce_xosc(x)
     except Exception:
         return x
 
@@ -362,6 +725,15 @@ def main():
         }
 
     ds = ds.map(to_messages)
+
+    def _ok_len(batch):
+        return [
+            len(tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False))
+            <= cfg["max_length"]
+            for msgs in batch["messages"]
+        ]
+
+    ds["train"] = ds["train"].filter(_ok_len, batched=True)
 
     sft_cfg = SFTConfig(
         max_length=cfg["max_length"],
