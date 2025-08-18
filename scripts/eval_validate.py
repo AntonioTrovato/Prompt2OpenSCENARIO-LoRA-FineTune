@@ -153,33 +153,52 @@ def build_minimal_xosc_from_features(feat: dict) -> str:
     E = etree.Element
     root = E("OpenScenario")
 
-    fh = E("FileHeader", revMajor="1", revMinor="0", date="2025-01-01T00:00:00", description="Minimal scenario")
+    # FileHeader
+    fh = E("FileHeader", revMajor="1", revMinor="0",
+           date="2025-01-01T00:00:00", description="Minimal scenario")
     root.append(fh)
 
+    # RoadNetwork
     rn = E("RoadNetwork")
     rn.append(E("LogicFile", filepath=map_path))
     root.append(rn)
 
+    # Empty but required
     root.append(E("ParameterDeclarations"))
     root.append(E("CatalogLocations"))
 
+    # Entities
     ents = E("Entities")
     for ent in entities:
         nm = ent.get("name") or "ego"
         typ = ent.get("type") or "vehicle"
         if typ == "pedestrian":
-            obj = E("Pedestrian", name=nm)
+            obj = E("Pedestrian", name=nm, mass="70", model="ped",
+                    pedestrianCategory="pedestrian")
+            bb = E("BoundingBox")
+            bb.append(E("Center", x="0", y="0", z="0.9"))
+            bb.append(E("Dimensions", width="0.5", length="0.5", height="1.8"))
+            obj.append(bb)
         elif typ == "misc":
-            obj = E("MiscObject", name=nm)
+            obj = E("MiscObject", name=nm, mass="100",
+                    miscObjectCategory="obstacle")
         else:
-            obj = E("Vehicle", name=nm)
+            obj = E("Vehicle", name=nm, vehicleCategory="car")
+            bb = E("BoundingBox")
+            bb.append(E("Center", x="0", y="0", z="0.9"))
+            bb.append(E("Dimensions", width="2.0", length="4.5", height="1.5"))
+            obj.append(bb)
         ents.append(obj)
     root.append(ents)
 
+    # Storyboard
     sb = E("Storyboard")
 
+    # Init: position + environment
     init = E("Init")
     actions = E("Actions")
+
+    # Private Actions: teleport each entity
     for ent in entities:
         nm = ent.get("name") or "ego"
         priv = E("Private", entityRef=nm)
@@ -194,9 +213,21 @@ def build_minimal_xosc_from_features(feat: dict) -> str:
         actions_priv.append(act)
         priv.append(actions_priv)
         actions.append(priv)
+
+    # GlobalAction: Environment
+    gact = E("GlobalAction")
+    envact = E("EnvironmentAction")
+    env = E("Environment", name="default_env")
+    env.append(E("TimeOfDay", dateTime=time_of_day))
+    env.append(E("Weather", cloudState=cloud, precipitationType=precip))
+    envact.append(env)
+    gact.append(envact)
+    actions.append(gact)
+
     init.append(actions)
     sb.append(init)
 
+    # Main Story
     story = E("Story", name="main_story")
     act = E("Act", name="act_1")
     for ent in entities:
@@ -207,22 +238,31 @@ def build_minimal_xosc_from_features(feat: dict) -> str:
         ev_action = E("Action")
         ev_action.append(E("ControllerAction"))
         ev.append(ev_action)
+        # Event StartTrigger
         st = E("StartTrigger")
         cg = E("ConditionGroup")
         c = E("Condition", delay="0", conditionEdge="rising")
         byv = E("ByValueCondition")
         byv.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
-        c.append(byv); cg.append(c); st.append(c)
+        c.append(byv)
+        cg.append(c)
+        st.append(cg)
         ev.append(st)
-        man.append(ev); mg.append(man)
+        man.append(ev)
+        mg.append(man)
         act.append(mg)
+
+    # Act StartTrigger
     st_act = E("StartTrigger")
     cg_act = E("ConditionGroup")
     c_act = E("Condition", delay="0", conditionEdge="rising")
     byv_act = E("ByValueCondition")
     byv_act.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
-    c_act.append(byv_act); cg_act.append(c_act); st_act.append(c_act)
+    c_act.append(byv_act)
+    cg_act.append(c_act)
+    st_act.append(cg_act)
     act.append(st_act)
+
     story.append(act)
     sb.append(story)
     root.append(sb)
