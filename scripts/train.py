@@ -14,255 +14,118 @@ import xml.etree.ElementTree as ET
 from typing import Optional, Dict, Any
 import re
 
-# ---------------------------
-# Feature extractor (fornita)
-# ---------------------------
-def extract_features_from_xosc(xosc_text: str) -> dict:
-    feat = {
-        "map": None,
-        "time_of_day": None,
-        "weather": {"cloud_state": None, "precipitation": None, "fog": None, "wind": None},
-        "speed_limits": [],
-        "entities": [],
-        "initial_positions": [],
-        "events": [],
-        "notes": []
-    }
-    try:
-        root = ET.fromstring(xosc_text)
-    except Exception:
-        feat["notes"].append("xml_parse_failed")
-        return feat
-
-    rn = root.find(".//RoadNetwork/LogicFile")
-    if rn is not None:
-        feat["map"] = rn.attrib.get("filepath") or rn.attrib.get("file") or None
-
-    tod = root.find(".//Environment/TimeOfDay")
-    if tod is not None:
-        feat["time_of_day"] = tod.attrib.get("dateTime") or tod.attrib.get("animation") or None
-
-    w = root.find(".//Environment/Weather")
-    if w is not None:
-        feat["weather"]["cloud_state"] = w.attrib.get("cloudState")
-        feat["weather"]["precipitation"] = w.attrib.get("precipitationType") or w.attrib.get("precipitation")
-        fog = w.find(".//Fog")
-        if fog is not None:
-            feat["weather"]["fog"] = fog.attrib.get("visualRange")
-        wind = w.find(".//Wind")
-        if wind is not None:
-            feat["weather"]["wind"] = wind.attrib.get("direction") or wind.attrib.get("speed")
-
-    for sl in root.findall(".//SpeedLimitAction") + root.findall(".//SpeedAction"):
-        maxkph = sl.attrib.get("max") or sl.attrib.get("target")
-        if maxkph:
-            feat["speed_limits"].append(maxkph)
-
-    for ent in root.findall(".//Entities/*"):
-        tag = ent.tag.lower()
-        name = ent.attrib.get("name") or ent.attrib.get("nameRef")
-        etype = "vehicle"
-        if "pedestrian" in tag:
-            etype = "pedestrian"
-        elif "misc" in tag:
-            etype = "misc"
-        if name:
-            feat["entities"].append({"name": name, "type": etype})
-
-    for priv in root.findall(".//Init/Actions/Private"):
-        name = priv.attrib.get("entityRef")
-        wp = priv.find(".//WorldPosition")
-        if wp is not None:
-            feat["initial_positions"].append({
-                "entity": name,
-                "x": wp.attrib.get("x"), "y": wp.attrib.get("y"),
-                "z": wp.attrib.get("z"), "h": wp.attrib.get("h")
-            })
-
-    for ev in root.findall(".//Storyboard//Event"):
-        ev_name = ev.attrib.get("name")
-        act = ev.find(".//Action")
-        trig = ev.find(".//StartTrigger") or ev.find(".//ConditionGroup")
-        desc = []
-        if ev_name: desc.append(ev_name)
-        if trig is not None:
-            for cond in trig.findall(".//ByValueCondition/SimulationTimeCondition"):
-                delay = cond.attrib.get("value")
-                if delay:
-                    desc.append(f"after {delay}s")
-        if act is not None:
-            atag = next((c.tag for c in list(act) if isinstance(c.tag, str)), None)
-            if atag:
-                desc.append(atag)
-        if desc:
-            feat["events"].append(" ".join(desc))
-    return feat
-
-# ---------------------------------
-# Riduzione on-the-fly dell'XML gold
-# ---------------------------------
-def minify_xml(x: str) -> str:
-    try:
-        #parser = etree.XMLParser(remove_blank_text=True, remove_comments=True)
-        #root = etree.fromstring(x.encode("utf-8"), parser=parser)
-        #return etree.tostring(root, encoding="unicode", pretty_print=False)
-        return reduce_xosc(x)
-    except Exception:
-        return x
-
 from lxml import etree
 
-def build_minimal_xosc_from_features(feat: dict) -> str:
-    # Fallbacks
-    map_path = feat.get("map") or "Town01.xodr"
-    time_of_day = feat.get("time_of_day") or "2025-01-01T12:00:00"
-    weather = feat.get("weather") or {}
-    cloud = weather.get("cloud_state") or "free"
-    precip = weather.get("precipitation") or "dry"
+EGO_NAME = "ego_vehicle"
 
-    entities = feat.get("entities") or []
-    if not entities:
-        entities = [{"name": "ego", "type": "vehicle"}]
+def reduce_xosc(xosc_content: str) -> str:
+    """
+    Riduce un file OpenSCENARIO 1.0 secondo le regole:
+    - Niente fusioni tra nodi gemelli (stesso tag).
+    - In ogni gruppo di gemelli per tag:
+        * Se almeno uno 'porta' a entityRef=ego o entityRef=secondo_veicolo, tieni TUTTI quelli che portano a (eccezione).
+        * Altrimenti tieni solo il primo.
+    - Non eliminare <ScenarioObject name="ego_vehicle"> né i suoi figli.
+    - Tra i non-ego referenziati, scegli il primo incontrato come 'secondo_veicolo' e tieni solo quello.
+    - Vietato eliminare rami che portano a entityRef=ego o entityRef=secondo_veicolo.
+    """
+    tree = ET.ElementTree(ET.fromstring(xosc_content))
+    root = tree.getroot()
 
-    init_pos_by_entity = {}
-    for ip in (feat.get("initial_positions") or []):
-        init_pos_by_entity[ip.get("entity")] = {
-            "x": ip.get("x") or "0", "y": ip.get("y") or "0",
-            "z": ip.get("z") or "0", "h": ip.get("h") or "0"
-        }
+    # -------------------------------------------------------------
+    # 1) Raccogli i riferimenti entityRef in ORDINE di documento
+    #    (non un set, così il "primo referenziato" è deterministico)
+    # -------------------------------------------------------------
+    ordered_entity_refs: List[str] = []
+    for elem in root.iter():
+        val = elem.attrib.get("entityRef")
+        if val is not None:
+            ordered_entity_refs.append(val)
 
-    def mk_pos(name):
-        p = init_pos_by_entity.get(name) or {"x":"0","y":"0","z":"0","h":"0"}
-        return p["x"], p["y"], p["z"], p["h"]
+    # Scegli il "secondo veicolo": primo entityRef != ego
+    second_vehicle = next((v for v in ordered_entity_refs if v != EGO_NAME), None)
 
-    E = etree.Element
-    root = E("OpenScenario")
+    # -------------------------------------------------------------
+    # 2) Mantieni solo ego + (eventuale) secondo_veicolo in <Entities>
+    # -------------------------------------------------------------
+    entities = root.find(".//Entities")
+    if entities is not None:
+        to_remove = []
+        for so in entities.findall("ScenarioObject"):
+            name = so.attrib.get("name")
+            if name == EGO_NAME:
+                continue
+            if name == second_vehicle:
+                continue
+            # rimuovi tutti gli altri non-ego
+            to_remove.append(so)
+        for so in to_remove:
+            entities.remove(so)
 
-    # FileHeader
-    fh = E("FileHeader", revMajor="1", revMinor="0",
-           date="2025-01-01T00:00:00", description="Minimal scenario")
-    root.append(fh)
+    protected_targets = {EGO_NAME}
+    if second_vehicle:
+        protected_targets.add(second_vehicle)
 
-    # RoadNetwork
-    rn = E("RoadNetwork")
-    rn.append(E("LogicFile", filepath=map_path))
-    root.append(rn)
+    # -------------------------------------------------------------
+    # 3) Helper: il nodo 'porta' a un protected? (ego o secondo)
+    #    True se nel suo sottoalbero esiste entityRef in protected_targets
+    # -------------------------------------------------------------
+    def leads_to_protected(node: ET.Element) -> bool:
+        for n in node.iter():
+            v = n.attrib.get("entityRef")
+            if v in protected_targets:
+                return True
+        return False
 
-    # Empty but required
-    root.append(E("ParameterDeclarations"))
-    root.append(E("CatalogLocations"))
+    # -------------------------------------------------------------
+    # 4) Deduplicazione senza fusioni, con eccezione per multipli protetti
+    #    Ragioniamo per gruppi di figli con lo stesso tag
+    # -------------------------------------------------------------
+    def reduce_node(node: ET.Element):
+        # Gruppo i figli per tag
+        children = list(node)
+        by_tag: Dict[str, List[ET.Element]] = {}
+        for ch in children:
+            by_tag.setdefault(ch.tag, []).append(ch)
 
-    # Entities
-    ents = E("Entities")
-    for ent in entities:
-        nm = ent.get("name") or "ego"
-        typ = ent.get("type") or "vehicle"
-        if typ == "pedestrian":
-            obj = E("Pedestrian", name=nm, mass="70", model="ped",
-                    pedestrianCategory="pedestrian")
-            bb = E("BoundingBox")
-            bb.append(E("Center", x="0", y="0", z="0.9"))
-            bb.append(E("Dimensions", width="0.5", length="0.5", height="1.8"))
-            obj.append(bb)
-        elif typ == "misc":
-            obj = E("MiscObject", name=nm, mass="100",
-                    miscObjectCategory="obstacle")
-        else:
-            obj = E("Vehicle", name=nm, vehicleCategory="car")
-            bb = E("BoundingBox")
-            bb.append(E("Center", x="0", y="0", z="0.9"))
-            bb.append(E("Dimensions", width="2.0", length="4.5", height="1.5"))
-            obj.append(bb)
-        ents.append(obj)
-    root.append(ents)
+        # Per ogni gruppo di gemelli per tag, applico la regola
+        for tag, group in by_tag.items():
+            if len(group) <= 1:
+                continue  # niente gemelli
 
-    # Storyboard
-    sb = E("Storyboard")
+            # Partiziona: protetti vs non protetti
+            protected_group = [g for g in group if leads_to_protected(g)]
+            non_protected_group = [g for g in group if g not in protected_group]
 
-    # Init: position + environment
-    init = E("Init")
-    actions = E("Actions")
+            # Caso A: esistono uno o più protetti -> tieni TUTTI i protetti, elimina tutti i non-protetti
+            if protected_group:
+                to_keep = set(protected_group)
+                to_drop = [g for g in group if g not in to_keep]
+            else:
+                # Caso B: nessun protetto -> tieni SOLO il primo (ordine documento), elimina gli altri
+                to_keep = {group[0]}
+                to_drop = group[1:]
 
-    # Private Actions: teleport each entity
-    for ent in entities:
-        nm = ent.get("name") or "ego"
-        priv = E("Private", entityRef=nm)
-        actions_priv = E("Actions")
-        act = E("Action")
-        tp = E("TeleportAction")
-        pos = E("Position")
-        x,y,z,h = mk_pos(nm)
-        pos.append(E("WorldPosition", x=x, y=y, z=z, h=h))
-        tp.append(pos)
-        act.append(tp)
-        actions_priv.append(act)
-        priv.append(actions_priv)
-        actions.append(priv)
+            for g in to_drop:
+                # Non rimuovere l'ego o il secondo veicolo se mai capitassero in un gruppo (per sicurezza)
+                if not (
+                    g.tag == "ScenarioObject"
+                    and g.attrib.get("name") in {EGO_NAME, second_vehicle}
+                ):
+                    node.remove(g)
 
-    # GlobalAction: Environment
-    gact = E("GlobalAction")
-    envact = E("EnvironmentAction")
-    env = E("Environment", name="default_env")
-    env.append(E("TimeOfDay", dateTime=time_of_day))
-    env.append(E("Weather", cloudState=cloud, precipitationType=precip))
-    envact.append(env)
-    gact.append(envact)
-    actions.append(gact)
+        # Ricorsione sui figli rimasti
+        for ch in list(node):
+            reduce_node(ch)
 
-    init.append(actions)
-    sb.append(init)
+    reduce_node(root)
 
-    # Main Story
-    story = E("Story", name="main_story")
-    act = E("Act", name="act_1")
-    for ent in entities:
-        nm = ent.get("name") or "ego"
-        mg = E("ManeuverGroup", name=f"mg_{nm}")
-        man = E("Maneuver", name=f"man_{nm}")
-        ev = E("Event", name=f"ev_{nm}", priority="overwrite")
-        ev_action = E("Action")
-        ev_action.append(E("ControllerAction"))
-        ev.append(ev_action)
-        # Event StartTrigger
-        st = E("StartTrigger")
-        cg = E("ConditionGroup")
-        c = E("Condition", delay="0", conditionEdge="rising")
-        byv = E("ByValueCondition")
-        byv.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
-        c.append(byv)
-        cg.append(c)
-        st.append(cg)
-        ev.append(st)
-        man.append(ev)
-        mg.append(man)
-        act.append(mg)
-
-    # Act StartTrigger
-    st_act = E("StartTrigger")
-    cg_act = E("ConditionGroup")
-    c_act = E("Condition", delay="0", conditionEdge="rising")
-    byv_act = E("ByValueCondition")
-    byv_act.append(E("SimulationTimeCondition", value="0", rule="greaterThan"))
-    c_act.append(byv_act)
-    cg_act.append(c_act)
-    st_act.append(cg_act)
-    act.append(st_act)
-
-    story.append(act)
-    sb.append(story)
-    root.append(sb)
-
-    return etree.tostring(root, encoding="unicode", pretty_print=False)
+    # Serializza (senza pretty-print per semplicità; aggiungibile se vuoi)
+    return ET.tostring(root, encoding="unicode")
 
 def reduce_assistant(xosc_text: str, mode: str) -> str:
-    if mode == "minify_only":
-        return minify_xml(xosc_text)
-    if mode == "features_skeleton":
-        try:
-            feats = extract_features_from_xosc(xosc_text)
-            return build_minimal_xosc_from_features(feats)
-        except Exception:
-            return minify_xml(xosc_text)
+    if mode == "minify":
+        return reduce_xosc(xosc_text)
     # "none"
     return xosc_text
 
@@ -273,8 +136,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     p.add_argument("--jsonl_path", default="")
-    p.add_argument("--use_feature_hints", action="store_true")
-    p.add_argument("--reduce_mode", choices=["none","minify_only","features_skeleton"], default="minify_only")
+    p.add_argument("--reduce_mode", choices=["none","minify"], default="minify")
     args = p.parse_args()
 
     cfg = yaml.safe_load(open(args.cfg))
@@ -352,12 +214,6 @@ def main():
 
         # fondi il system nel primo user (stile CodeLlama)
         user_with_sys = f"<<SYS>>\n{system}\n<</SYS>>\n\n{user}"
-        if args.use_feature_hints:
-            try:
-                feats = extract_features_from_xosc(ex["assistant"])
-                user_with_sys += "\n\n<HINTS>\n" + json.dumps(feats, ensure_ascii=False) + "\n</HINTS>\n"
-            except Exception:
-                pass
 
         return {
             "messages": [
