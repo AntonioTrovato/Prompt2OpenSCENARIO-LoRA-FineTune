@@ -1,0 +1,135 @@
+<OpenScenario>
+  <FileHeader revMajor="1" revMinor="0" date="2024-01-01T00:00:00" description="Reduced Scenario" author="Reducer" />
+  <CatalogLocations />
+  <RoadNetwork>
+    <LogicFile filepath="DEU_Freiberg_1_3_I-1-1.xodr" />
+  </RoadNetwork>
+  <Entities>
+    <ScenarioObject name="ego_vehicle">
+      <Vehicle name="vehicle.lincoln.mkz2017" vehicleCategory="car">
+        <BoundingBox>
+          <Center x="2.0" y="0.0" z="0.9" />
+          <Dimensions height="1.8" length="5.0" width="2.0" />
+        </BoundingBox>
+        <Performance maxAcceleration="10.0" maxDeceleration="10.0" maxSpeed="69.0" />
+        <Axles>
+          <FrontAxle maxSteering="0.5" positionX="3.1" positionZ="0.3" trackWidth="1.8" wheelDiameter="0.6" />
+          <RearAxle maxSteering="0.0" positionX="0.0" positionZ="0.3" trackWidth="1.8" wheelDiameter="0.6" />
+        </Axles>
+        <Properties>
+          <Property name="type" value="ego_vehicle" />
+        </Properties>
+      </Vehicle>
+    </ScenarioObject>
+  </Entities>
+  <Storyboard>
+    <Init>
+      <Actions>
+        <GlobalAction>
+          <EnvironmentAction>
+            <Environment name="Environment">
+              <TimeOfDay animation="false" dateTime="2024-07-15T12:00:00" />
+              <Weather cloudState="free">
+                <Sun intensity="1.0" azimuth="0.0" elevation="1.31" />
+                <Fog visualRange="100000.0" />
+                <Precipitation precipitationType="dry" intensity="0.0" />
+              </Weather>
+              <RoadCondition frictionScaleFactor="1.0">
+                <Properties>
+                  <Property name="speedLimit" value="50.0" />
+                  <Property name="notes" value="Reduced scenario - essential elements only" />
+                </Properties>
+              </RoadCondition>
+            </Environment>
+          </EnvironmentAction>
+        </GlobalAction>
+        <Private entityRef="ego_vehicle">
+          <PrivateAction>
+            <TeleportAction>
+              <Position>
+                <WorldPosition x="0.0" y="0.0" z="0.0" h="0.0" p="0.0" r="0.0" />
+              </Position>
+            </TeleportAction>
+          </PrivateAction>
+        </Private>
+      </Actions>
+    </Init>
+    <Story name="MainStory">
+      <Act name="MainAct">
+        <ManeuverGroup maximumExecutionCount="1" name="MainManeuverGroup">
+          <Actors selectTriggeringEntities="false">
+            <EntityRef entityRef="ego_vehicle" />
+          </Actors>
+          <Maneuver name="EssentialManeuver">
+            <Event name="StartAutopilot" priority="overwrite">
+              <Action name="StartAutopilot">
+                <PrivateAction>
+                  <ActivateControllerAction longitudinal="true" />
+                </PrivateAction>
+              </Action>
+              <StartTrigger>
+                <ConditionGroup>
+                  <Condition conditionEdge="rising" delay="0.0" name="startTrigger">
+                    <ByValueCondition>
+                      <SimulationTimeCondition rule="greaterThan" value="0.0" />
+                    </ByValueCondition>
+                  </Condition>
+                </ConditionGroup>
+              </StartTrigger>
+            </Event>
+            <Event name="StopAutopilot" priority="overwrite">
+              <Action name="StopAutopilot">
+                <PrivateAction>
+                  <ActivateControllerAction longitudinal="false" />
+                </PrivateAction>
+              </Action>
+              <StartTrigger>
+                <ConditionGroup>
+                  <Condition conditionEdge="rising" delay="0.0" name="startTrigger">
+                    <ByValueCondition>
+                      <SimulationTimeCondition rule="greaterThan" value="0.0" />
+                    </ByValueCondition>
+                  </Condition>
+                </ConditionGroup>
+              </StartTrigger>
+            </Event>
+            <Event name="StartAutopilot" priority="overwrite">
+              <Action name="StartAutopilot">
+                <PrivateAction>
+                  <ActivateControllerAction longitudinal="true" />
+                </PrivateAction>
+              </Action>
+              <StartTrigger>
+                <ConditionGroup>
+                  <Condition conditionEdge="rising" delay="0.0" name="startTrigger">
+                    <ByValueCondition>
+                      <SimulationTimeCondition rule="greaterThan" value="0.0" />
+                    </ByValueCondition>
+                  </Condition>
+                </ConditionGroup>
+              </StartTrigger>
+            </Event>
+          </Maneuver>
+        </ManeuverGroup>
+        <StartTrigger>
+          <ConditionGroup>
+            <Condition name="ActStart" delay="0" conditionEdge="rising">
+              <ByValueCondition>
+                <SimulationTimeCondition value="0.0" rule="greaterThan" />
+              </ByValueCondition>
+            </Condition>
+          </ConditionGroup>
+        </StartTrigger>
+      </Act>
+    </Story>
+    <StopTrigger>
+      <ConditionGroup>
+        <Condition name="StopCondition" delay="0" conditionEdge="rising">
+          <ByValueCondition>
+            <SimulationTimeCondition value="60.0" rule="greaterThan" />
+          </ByValueCondition>
+        </Condition>
+      </ConditionGroup>
+    </StopTrigger>
+  </Storyboard>
+</OpenScenario>
