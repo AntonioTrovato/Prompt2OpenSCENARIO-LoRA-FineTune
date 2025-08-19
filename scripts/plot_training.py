@@ -14,3 +14,4 @@ plt.title("Training loss curve")
 os.makedirs("runs/plots", exist_ok=True)
 plt.savefig("runs/plots/training_loss.png", dpi=160)
 print("Saved runs/plots/training_loss.png")
+# TODO: Posso calcolare perplexity da qui?

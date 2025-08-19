@@ -123,9 +123,21 @@ def reduce_xosc(xosc_content: str) -> str:
     # Serializza (senza pretty-print per semplicità; aggiungibile se vuoi)
     return ET.tostring(root, encoding="unicode")
 
-def reduce_assistant(xosc_text: str, mode: str) -> str:
+def xsd_ok(x, xsd_path):
+    if not xsd_path or not os.path.isfile(xsd_path):
+        return None, "no_xsd"
+    try:
+        schema = etree.XMLSchema(etree.parse(xsd_path))
+        xml = etree.fromstring(x.encode("utf-8"))
+        return schema.validate(xml), None
+    except Exception as e:
+        return False, str(e)
+
+def reduce_assistant(xosc_text: str, mode: str, xsd_path: str) -> str:
     if mode == "minify":
-        return reduce_xosc(xosc_text)
+        reduced = reduce_xosc(xosc_text)
+        if xsd_ok(reduced,xsd_path):
+            return reduced
     # "none"
     return xosc_text
 
@@ -208,7 +220,7 @@ def main():
     def to_messages(ex):
         system = ex["system"].strip()
         user = ex["user"].strip()
-        assistant = reduce_assistant(ex["assistant"].strip(), args.reduce_mode)
+        assistant = reduce_assistant(ex["assistant"].strip(), args.reduce_mode, cfg["xsd_path"])
         if not assistant.endswith(stop_seq):
             assistant += stop_seq
 

@@ -47,5 +47,5 @@ gen_top_p: 0.9 # almost deterministic
 stop_sequence: "</OpenScenario>" # generations stops after this tag
 
 # Valutazione (slot & XSD)
-xsd_path: "../xsd/OpenSCENARIO.xsd" # the OpenSCENARIO 1.0 xsd path to formally validate the LLM's outputs
+xsd_path: "xsd/OpenSCENARIO.xsd" # the OpenSCENARIO 1.0 xsd path to formally validate the LLM's outputs
 val_split_ratio: 0.1 # using the 10% of the dataset for test
