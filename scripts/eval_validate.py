@@ -3,6 +3,7 @@ import time
 from typing import List, Dict
 
 import torch
+import yaml
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
 from peft import PeftModel
@@ -21,15 +22,23 @@ try:
 except Exception:
     NVML_HANDLE = None
 
-class StopOnSequence(StoppingCriteria):
-    def __init__(self, stop_ids):
-        super().__init__()
-        self.stop_ids = stop_ids
-        self.k = len(stop_ids)
-    def __call__(self, input_ids, scores, **kwargs):
-        if input_ids.shape[1] < self.k:
+STOP_STR = "</OpenScenario>"
+
+class StopOnSubstrings(StoppingCriteria):
+    def __init__(self, tok, substrings, start_len=0):
+        self.tok = tok
+        self.substrings = substrings
+        self.start_len = start_len  # numero di token di prompt
+
+    def set_start_len(self, n):
+        self.start_len = n
+
+    def __call__(self, input_ids, scores, **kw):
+        gen_ids = input_ids[0, self.start_len:].tolist()
+        if not gen_ids:
             return False
-        return (input_ids[0, -self.k:].tolist() == self.stop_ids)
+        text = self.tok.decode(gen_ids, skip_special_tokens=True)
+        return any(s in text for s in self.substrings)
 
 EGO_NAME = "ego_vehicle"
 
@@ -289,32 +298,34 @@ def xsd_ok(x, xsd_path):
     except Exception as e:
         return False, str(e)
 
-def reduce_mode(xosc_text: str, mode: str) -> str:
+def reduce_mode(xosc_text: str, mode: str, xsd_path: str) -> str:
     if mode == "minify":
-        return reduce_xosc(xosc_text)
+        reduced = reduce_xosc(xosc_text)
+        if xsd_ok(reduced,xsd_path):
+            return reduced
     return xosc_text  # "none"
 
 def build_prompt(sys_tmpl: str, system: str, user: str) -> str:
-    hints_block = ""
-    prompt = sys_tmpl.format(system=system.strip(), user=(user.strip() + hints_block))
+    prompt = sys_tmpl.format(system=system.strip(), user=(user.strip()))
     if prompt.endswith("[/INST]"):
         prompt += "\n"
     return prompt
 
-def generate(model, tok, prompt, max_new_tokens, temperature, top_p, stops):
+def generate(model, tok, prompt, max_new_tokens, do_sample, temperature, top_p):
     enc = tok(prompt, return_tensors="pt")
     enc = {k: v.to(model.device) for k, v in enc.items()}
-
+    stopper = StopOnSubstrings(tok, [STOP_STR])
+    stopper.set_start_len(enc["input_ids"].shape[1])
     with torch.inference_mode():            # <<< qui
         out = model.generate(
             **enc,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
+            do_sample=do_sample,
             temperature=temperature,
             top_p=top_p,
             pad_token_id=tok.pad_token_id,
             eos_token_id=tok.eos_token_id,
-            stopping_criteria=stops,
+            stopping_criteria=StoppingCriteriaList([stopper]),
         )
     txt = tok.decode(out[0], skip_special_tokens=True)
     m = re.search(r"<OpenScenario\b.*</OpenScenario>", txt, flags=re.DOTALL)
@@ -324,6 +335,7 @@ def generate(model, tok, prompt, max_new_tokens, temperature, top_p, stops):
     rest = txt.split(prompt)[-1].strip()
     if "</OpenScenario>" in rest:
         return rest.split("</OpenScenario>")[0].strip() + "</OpenScenario>"
+    #TODO: per fare bene il confronto quest return deve dare <OpenScenario>...</OpenScenario>
     return rest
 
 def compute_ppl(model, tok, prompt: str, gold: str) -> float:
@@ -347,70 +359,69 @@ def compute_ppl(model, tok, prompt: str, gold: str) -> float:
     return loss
 
 def main():
+    #TODO: valutare l'uso di itemperatura e top_p
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base_model", default="codellama/CodeLlama-13b-Instruct-hf")
-    ap.add_argument("--lora_repo", required=True)
-    ap.add_argument("--hf_dataset_repo", required=True)
+    ap.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     ap.add_argument("--split", default="validation", choices=["train","validation"])
     ap.add_argument("--limit", type=int, default=200)
-    ap.add_argument("--xsd_path", default="xsd/OpenSCENARIO.xsd")
-    ap.add_argument("--sys_template", default="prompt_templates/codellama_inst.txt")
     ap.add_argument("--reduce_mode", choices=["none","minify"], default="minify")
-    ap.add_argument("--gen_max_new_tokens", type=int, default=1500)
-    ap.add_argument("--gen_temperature", type=float, default=0.1)
-    ap.add_argument("--gen_top_p", type=float, default=0.9)
     args = ap.parse_args()
+
+    cfg = yaml.safe_load(open(args.cfg))
 
     # Carica il tokenizer dalla repo LoRA (così prendi anche chat_template.jinja)
     try:
-        tok = AutoTokenizer.from_pretrained(args.lora_repo, use_fast=True)
+        tok = AutoTokenizer.from_pretrained(cfg["hf_model_repo"], use_fast=True)
     except Exception:
         # fallback al base model se la LoRA non contiene il tokenizer
-        tok = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
+        tok = AutoTokenizer.from_pretrained(cfg["base_model"], use_fast=True)
 
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"  # allineato al training
 
-    stop_ids = tok("</OpenScenario>", add_special_tokens=False).input_ids
-    stops = StoppingCriteriaList([StopOnSequence(stop_ids)])
-
     from transformers import BitsAndBytesConfig
 
-    bnb = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,  # ok anche float16 se preferisci
-    )
+    use_4bit = bool(cfg.get("load_in_4bit", False))
+    dtype = torch.bfloat16 if str(cfg.get("torch_dtype", "bfloat16")) == "bfloat16" else torch.float16
+
+    bnb_config = None
+    if use_4bit:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=cfg.get("bnb_4bit_quant_type", "nf4"),
+            bnb_4bit_use_double_quant=cfg.get("bnb_4bit_use_double_quant", True),
+            bnb_4bit_compute_dtype=torch.bfloat16 if str(
+                cfg.get("bnb_4bit_compute_dtype", "bfloat16")) == "bfloat16" else torch.float16,
+        )
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.base_model,
-        quantization_config=bnb,
-        device_map="auto",
-        low_cpu_mem_usage=True,
+        cfg["base_model"],
+        torch_dtype=dtype if not use_4bit else None,
+        quantization_config=bnb_config if use_4bit else None,
+        device_map="auto" if use_4bit else None,  # utile con 4-bit
     )
-    model = PeftModel.from_pretrained(model, args.lora_repo)
+    model = PeftModel.from_pretrained(model, cfg["hf_model_repo"])
     model.eval()
 
     # Allinea gli id per la generazione (alcuni modelli ne hanno di diversi)
     model.config.pad_token_id = tok.pad_token_id
     model.config.eos_token_id = tok.eos_token_id
 
-    sys_tmpl = open(args.sys_template, "r", encoding="utf-8").read()
+    sys_tmpl = open(cfg["sys_template"], "r", encoding="utf-8").read()
 
-    ds = load_dataset(args.hf_dataset_repo, split="train")
-    split = ds.train_test_split(test_size=0.1, seed=42)
+    ds = load_dataset(cfg["hf_dataset_repo"], split="train")
+    split = ds.train_test_split(test_size=cfg["val_split_ratio"], seed=42)
     subset = split["test"] if args.split == "validation" else split["train"]
     if args.limit:
         subset = subset.shuffle(seed=42)
         subset = subset.select(range(min(args.limit, len(subset))))
 
     preds, golds, rows = [], [], []
-    bleu_refs, bleu_hyps = [], []
-    rouge = RougeScorer(["rougeL"], use_stemmer=True)
+    #bleu_refs, bleu_hyps = [], []
+    #rouge = RougeScorer(["rougeL"], use_stemmer=True)
     gen_times, gpu_utils, vram_gbs, ram_gbs = [], [], [], []
-    ppl_losses = []
+    #ppl_losses = []
 
     total = len(subset)
     t0 = time.time()
@@ -419,11 +430,11 @@ def main():
 
         gold_full = ex["assistant"].strip()
         # gold ridotto secondo policy scelta (coerente col training)
-        gold = reduce_mode(gold_full, args.reduce_mode)
+        gold = reduce_mode(gold_full, args.reduce_mode, cfg["xsd_path"])
 
         prompt = build_prompt(sys_tmpl, ex["system"], ex["user"], gold_full)
         t_step_start = time.time()
-        pred = generate(model, tok, prompt, args.gen_max_new_tokens, args.gen_temperature, args.gen_top_p, stops)
+        pred = generate(model, tok, prompt, cfg["max_length"], cfg["do_sample"], cfg["gen_temperature"], cfg["gen_top_p"])
         gen_times.append(time.time() - t_step_start)
 
         # Perplexity Losses
@@ -431,7 +442,7 @@ def main():
 
         # Metriche base
         well_pred, _ = xml_ok(pred)
-        xsd_pred, _ = xsd_ok(pred, args.xsd_path)
+        xsd_pred, _ = xsd_ok(pred, cfg["xsd_path"])
         exact = int(pred.strip() == gold.strip())
 
         # BLEU / ROUGE
@@ -500,6 +511,7 @@ def main():
                     m = pynvml.nvmlDeviceGetMemoryInfo(NVML_HANDLE)
                     gpu_utils.append(float(u.gpu))  # %
                     vram_gbs.append(m.used / 1e9)  # GB
+                    # TODO: verifica che i valori di questi parametri siano ok
                 else:
                     vram_gbs.append(torch.cuda.memory_allocated() / 1e9)
             except Exception:
@@ -521,14 +533,13 @@ def main():
 
     total_gen_time = float(np.sum(gen_times)) if gen_times else 0.0
     throughput_scen_per_s = (len(gen_times) / total_gen_time) if total_gen_time > 0 else None
-    throughput_scen_per_min = (throughput_scen_per_s * 60.0) if throughput_scen_per_s else None
 
     #avg_ppl = math.exp(float(np.mean(ppl_losses))) if ppl_losses else None
 
     metrics = {
         "count": len(rows),
         "xml_wellformed_rate": mean("wellformed_pred"),
-        "xsd_valid_rate": mean("xsd_valid_pred") if args.xsd_path else None,
+        "xsd_valid_rate": mean("xsd_valid_pred") if cfg["xsd_path"] else None,
         "exact_match": mean("exact_match"),
         #"perplexity": avg_ppl,
         #"bleu": float(bleu.score),
@@ -545,7 +556,6 @@ def main():
         #"length_ratio_avg": mean("len_ratio"),
         "avg_generation_time_s": float(np.mean(gen_times)) if gen_times else None,
         "throughput_scen_per_s": throughput_scen_per_s,
-        "throughput_scen_per_min": throughput_scen_per_min,
         "avg_gpu_util_percent": float(np.mean(gpu_utils)) if gpu_utils else None,
         "avg_vram_gb": float(np.mean(vram_gbs)) if vram_gbs else None,
         "avg_ram_gb": float(np.mean(ram_gbs)) if ram_gbs else None

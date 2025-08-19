@@ -5,7 +5,7 @@
             openSCENARIO XSD Version 1.0 (Consolidated from Version 0.9.1)
         </xsd:documentation>
     </xsd:annotation>
-    <xsd:element name="OpenSCENARIO" type="OpenScenario"/>
+    <xsd:element name="OpenScenario" type="OpenScenario"/>
     <xsd:complexType name="OpenScenario">
         <xsd:sequence>
             <xsd:element name="FileHeader" type="FileHeader"/>
