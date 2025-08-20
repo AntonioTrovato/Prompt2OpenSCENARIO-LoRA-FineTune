@@ -262,9 +262,12 @@ def build_prompt(sys_tmpl: str, system: str, user: str) -> str:
 def generate(model, tok, prompt, max_new_tokens, do_sample, temperature, top_p):
     enc = tok(prompt, return_tensors="pt")
     enc = {k: v.to(model.device) for k, v in enc.items()}
+    prompt_len = enc["input_ids"].shape[1]
+
     stopper = StopOnSubstrings(tok, [STOP_STR])
-    stopper.set_start_len(enc["input_ids"].shape[1])
-    with torch.inference_mode():            # <<< qui
+    stopper.set_start_len(prompt_len)
+
+    with torch.inference_mode():
         out = model.generate(
             **enc,
             max_new_tokens=max_new_tokens,
@@ -275,15 +278,22 @@ def generate(model, tok, prompt, max_new_tokens, do_sample, temperature, top_p):
             eos_token_id=tok.eos_token_id,
             stopping_criteria=StoppingCriteriaList([stopper]),
         )
-    txt = tok.decode(out[0], skip_special_tokens=True)
+
+    # 🔑 Decodifica SOLO i token generati (escludi il prompt)
+    gen_ids = out[0][prompt_len:]
+    txt = tok.decode(gen_ids, skip_special_tokens=True)
+
     m = re.search(r"<OpenScenario\b.*</OpenScenario>", txt, flags=re.DOTALL)
     if m:
         return m.group(0).strip()
-    # fallback: prendi dal prompt in poi
-    rest = txt.split(prompt)[-1].strip()
-    if "</OpenScenario>" in rest:
-        return rest.split("</OpenScenario>")[0].strip() + "</OpenScenario>"
-    return rest
+
+    # fallback: se ha incluso testo extra prima del tag
+    if "</OpenScenario>" in txt:
+        return (txt.split("</OpenScenario>")[0].split("<OpenScenario")[-1].rpartition("<")[0] \
+                and "<OpenScenario" + txt.split("<OpenScenario",1)[-1].split("</OpenScenario>")[0] + "</OpenScenario>") \
+            or (txt.split("</OpenScenario>")[0].strip() + "</OpenScenario>")
+
+    return txt.strip()
 
 def compute_ppl(model, tok, prompt: str, gold: str) -> float:
     # Assicurati che il gold termini con il tag di chiusura (come nel training)
@@ -305,60 +315,14 @@ def compute_ppl(model, tok, prompt: str, gold: str) -> float:
         loss = float(out.loss.item())
     return loss
 
-def ask_coherence(client: "OpenAI", model: str, sys_prompt: str, user_text: str, pred_xosc: str) -> float:
-    """
-    Restituisce un float in [0,1] (o None in caso di errore) come coerenza tra 'user_text' e 'pred_xosc'.
-    """
-    try:
-        msg_user = (
-            "USER (natural-language description):\n"
-            f"{user_text}\n\n"
-            "PREDICTION (OpenSCENARIO XML):\n"
-            f"{pred_xosc}\n\n"
-            "Respond with a single number in [0,1]."
-        )
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            max_tokens=10,
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": msg_user},
-            ],
-        )
-        txt = (resp.choices[0].message.content or "").strip()
-        m = re.search(r"([01](?:\.\d+)?)", txt)
-        if not m:
-            return None
-        val = float(m.group(1))
-        if val < 0: val = 0.0
-        if val > 1: val = 1.0
-        #print(val)
-        return val
-    except Exception:
-        return None
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     ap.add_argument("--split", default="validation", choices=["train","validation"])
-    ap.add_argument("--limit", type=int, default=200)
-    ap.add_argument("--coherence", action="store_true",
-                    help="Calcola la metrica di coerenza chiamando GPT-5.")
-    ap.add_argument("--coherence_model", default="gpt-5",
-                    help="Modello usato per la coerenza (default: gpt-5).")
-    ap.add_argument("--coherence_sys_prompt", default=(
-        "You are an impartial grader. Given a natural-language description (user) and an "
-        "OpenSCENARIO 1.0 XML (prediction), reply with ONLY one decimal number in [0,1] "
-        "representing how well the XML corresponds to the description (0=no match, 1=perfect match). "
-        "No words, no symbols, no explanation—just the number."
-    ), help="System prompt per il calcolo della coerenza.")
+    ap.add_argument("--limit", type=int, default=47)
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.cfg))
-
-    client = OpenAI() if args.coherence else None
 
     # Carica il tokenizer dalla repo LoRA (così prendi anche chat_template.jinja)
     try:
@@ -415,6 +379,7 @@ def main():
     ppl_losses = []
 
     total = len(subset)
+    gen_records = []
     t0 = time.time()
 
     for i, ex in enumerate(subset, start=1):
@@ -441,28 +406,29 @@ def main():
 
         # Slot F1 (da feature extractor)
         p_slots, g_slots = extract_features_from_xosc(pred), extract_features_from_xosc(gold)
+
         def slots_to_bools(s, closing_text):
             return {
+                # presenza mappa
                 "has_map": bool(s.get("map")),
+                # tempo del giorno
                 "has_time": bool(s.get("time_of_day")),
-                "has_weather": any(v for v in (s.get("weather") or {}).values() if v),
-                "veh_ge1": sum(1 for e in s.get("entities", []) if e.get("type") != "pedestrian") >= 1,
-                "veh_ge2": sum(1 for e in s.get("entities", []) if e.get("type") != "pedestrian") >= 2,
+                # condizioni meteo
+                "has_clouds": bool((s.get("weather") or {}).get("cloud_state")),
+                "has_precipitation": bool((s.get("weather") or {}).get("precipitation")),
+                "has_fog": bool((s.get("weather") or {}).get("fog")),
+                # entità
+                "has_ego": any(e for e in s.get("entities", []) if e.get("type") == "ego"),
+                # posizioni iniziali
+                "has_init_positions": len(s.get("initial_positions", [])) > 0,
+                # eventi/storyboard
+                "has_events": len(s.get("events", [])) > 0,
+                # chiusura corretta
                 "ends_close": closing_text.strip().endswith("</OpenScenario>")
             }
+
         p_bools, g_bools = slots_to_bools(p_slots, pred), slots_to_bools(g_slots, gold)
         prec, rec, f1, acc = bool_f1(g_bools, p_bools)
-
-        # cosa ne pensa gpt?
-        coh = None
-        if args.coherence:
-            coh = ask_coherence(
-                client=client,
-                model=args.coherence_model,
-                sys_prompt=args.coherence_sys_prompt,
-                user_text=ex["user"],
-                pred_xosc=pred,
-            )
 
         # chrF++
         #chrf = sacrebleu.corpus_chrf([pred], [[gold]]).score / 100.0
@@ -494,7 +460,6 @@ def main():
             "exact_match": exact,
             #"rougeL": r,
             "slot_precision": prec, "slot_recall": rec, "slot_f1": f1, "slot_acc": acc,
-            "coherence": coh,
             #"chrfpp": chrf,
             #"meteor": meteor,
             #"bertscore_f1": bert_f1,
@@ -517,6 +482,14 @@ def main():
             except Exception:
                 pass
         ram_gbs.append(psutil.Process().memory_info().rss / 1e9)
+
+        gen_records.append({
+            "id": i,
+            "system": ex["system"],
+            "user": ex["user"],
+            "gold": gold,
+            "prediction": pred
+        })
 
         if True:
             avg = (time.time() - t0) / i
@@ -551,7 +524,6 @@ def main():
         "slot_recall": mean("slot_recall"),
         "slot_f1": mean("slot_f1"),
         "slot_accuracy": mean("slot_acc"),
-        "coherence": mean("coherence"),
         #"edit_similarity": mean("edit_sim"),
         #"jaccard_xml_tags": mean("jaccard_tags"),
         #"length_ratio_avg": mean("len_ratio"),
@@ -566,6 +538,9 @@ def main():
     with open("runs/eval/metrics.json","w") as f:
         json.dump(metrics, f, indent=2)
     print(json.dumps(metrics, indent=2))
+    with open("runs/eval/predictions.jsonl", "w", encoding="utf-8") as f:
+        for rec in gen_records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 if __name__ == "__main__":
     main()
