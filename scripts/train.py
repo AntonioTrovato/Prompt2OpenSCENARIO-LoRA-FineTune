@@ -112,10 +112,10 @@ def main():
 
     ds = ds.map(to_messages)
 
-    print("Numero di token per record (split train):")
-    for i, ex in enumerate(ds["train"]):
-        tokens = tok.apply_chat_template(ex["messages"], tokenize=True, add_generation_prompt=False)
-        print(f"Record {i}: {len(tokens)} token")
+    #print("Numero di token per record (split train):")
+    #for i, ex in enumerate(ds["train"]):
+    #    tokens = tok.apply_chat_template(ex["messages"], tokenize=True, add_generation_prompt=False)
+    #    print(f"Record {i}: {len(tokens)} token")
 
     def _ok_len(batch):
         return [
