@@ -77,6 +77,8 @@ def main():
     else:
         ds = load_dataset(cfg["hf_dataset_repo"], split="train")
 
+    print(f"Numero totale di record nel dataset: {len(ds)}")
+
     ds = ds.train_test_split(test_size=cfg.get("val_split_ratio", 0.1), seed=cfg["seed"])
     ds = DatasetDict({"train": ds["train"], "validation": ds["test"]})
 
@@ -109,6 +111,11 @@ def main():
         }
 
     ds = ds.map(to_messages)
+
+    print("Numero di token per record (split train):")
+    for i, ex in enumerate(ds["train"]):
+        tokens = tok.apply_chat_template(ex["messages"], tokenize=True, add_generation_prompt=False)
+        print(f"Record {i}: {len(tokens)} token")
 
     def _ok_len(batch):
         return [
