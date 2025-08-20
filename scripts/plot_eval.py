@@ -1,13 +1,16 @@
 import json, matplotlib.pyplot as plt, os
 m = json.load(open("runs/eval/metrics.json"))
-labels = ["XML ok","XSD ok","Exact","Perplexity","BLEu","ROUGE-L F1","CHRFPP","METEOR","BERT Score F1", "Slot Prec","Slot Rec","Slot Acc","Slot F1",
-          "Edit Similarity","Jaccard XML Tags","Length Ratio Avg","Avg Generation Time (s)", "Throughput Scenarios per Gen (s)",
+#labels = ["XML ok","XSD ok","Exact","Perplexity","BLEu","ROUGE-L F1","CHRFPP","METEOR","BERT Score F1", "Slot Prec","Slot Rec","Slot Acc","Slot F1",
+#          "Edit Similarity","Jaccard XML Tags","Length Ratio Avg","Avg Generation Time (s)", "Throughput Scenarios per Gen (s)",
+#          "Avg GPU Util (%)", "Avg VRAM GBs", "Avg RAM GBs"]
+labels = ["XML ok","XSD ok","Exact","Perplexity", "Slot Prec","Slot Rec","Slot Acc","Slot F1",
+          "Avg Generation Time (s)", "Throughput Scenarios per Gen (s)",
           "Avg GPU Util (%)", "Avg VRAM GBs", "Avg RAM GBs"]
 values = [
     m["xml_wellformed_rate"] or 0,                                  # XML ok
     (m["xsd_valid_rate"] or 0) if m.get("xsd_valid_rate") else 0,   # XSD ok
     m["exact_match"] or 0,                                          # Exact
-    #m.get("perplexity", 0) or 0,                                    # Perplexity
+    m.get("perplexity", 0) or 0,                                    # Perplexity
     #(m["bleu"] or 0) / 100.0 if m.get("bleu") is not None else 0,   # BLEU
     #m.get("rougeL_f1", 0) or 0,                                     # ROUGE-L F1
     #m.get("chrfpp", 0) or 0,                                        # CHRFPP

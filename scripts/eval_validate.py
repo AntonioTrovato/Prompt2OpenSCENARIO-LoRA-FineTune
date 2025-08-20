@@ -282,7 +282,6 @@ def generate(model, tok, prompt, max_new_tokens, do_sample, temperature, top_p):
     rest = txt.split(prompt)[-1].strip()
     if "</OpenScenario>" in rest:
         return rest.split("</OpenScenario>")[0].strip() + "</OpenScenario>"
-    #TODO: per fare bene il confronto quest return deve dare <OpenScenario>...</OpenScenario>
     return rest
 
 def compute_ppl(model, tok, prompt: str, gold: str) -> float:
@@ -306,7 +305,6 @@ def compute_ppl(model, tok, prompt: str, gold: str) -> float:
     return loss
 
 def main():
-    #TODO: valutare l'uso di itemperatura e top_p
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     ap.add_argument("--split", default="validation", choices=["train","validation"])
@@ -367,7 +365,7 @@ def main():
     #bleu_refs, bleu_hyps = [], []
     #rouge = RougeScorer(["rougeL"], use_stemmer=True)
     gen_times, gpu_utils, vram_gbs, ram_gbs = [], [], [], []
-    #ppl_losses = []
+    ppl_losses = []
 
     total = len(subset)
     t0 = time.time()
@@ -381,7 +379,7 @@ def main():
         gen_times.append(time.time() - t_step_start)
 
         # Perplexity Losses
-        #ppl_losses.append(compute_ppl(model, tok, prompt, gold))
+        ppl_losses.append(compute_ppl(model, tok, prompt, gold))
 
         # Metriche base
         well_pred, _ = xml_ok(pred)
@@ -454,7 +452,6 @@ def main():
                     m = pynvml.nvmlDeviceGetMemoryInfo(NVML_HANDLE)
                     gpu_utils.append(float(u.gpu))  # %
                     vram_gbs.append(m.used / 1e9)  # GB
-                    # TODO: verifica che i valori di questi parametri siano ok
                 else:
                     vram_gbs.append(torch.cuda.memory_allocated() / 1e9)
             except Exception:
@@ -477,14 +474,14 @@ def main():
     total_gen_time = float(np.sum(gen_times)) if gen_times else 0.0
     throughput_scen_per_s = (len(gen_times) / total_gen_time) if total_gen_time > 0 else None
 
-    #avg_ppl = math.exp(float(np.mean(ppl_losses))) if ppl_losses else None
+    avg_ppl = math.exp(float(np.mean(ppl_losses))) if ppl_losses else None
 
     metrics = {
         "count": len(rows),
         "xml_wellformed_rate": mean("wellformed_pred"),
         "xsd_valid_rate": mean("xsd_valid_pred") if cfg["xsd_path"] else None,
         "exact_match": mean("exact_match"),
-        #"perplexity": avg_ppl,
+        "perplexity": avg_ppl,
         #"bleu": float(bleu.score),
         #"rougeL_f1": mean("rougeL"),
         #"chrfpp": mean("chrfpp"),
