@@ -1,6 +1,7 @@
 import os, json, argparse, re
 import time
 from typing import List, Dict
+from openai import OpenAI
 
 import torch
 import yaml
@@ -304,14 +305,60 @@ def compute_ppl(model, tok, prompt: str, gold: str) -> float:
         loss = float(out.loss.item())
     return loss
 
+def ask_coherence(client: "OpenAI", model: str, sys_prompt: str, user_text: str, pred_xosc: str) -> float:
+    """
+    Restituisce un float in [0,1] (o None in caso di errore) come coerenza tra 'user_text' e 'pred_xosc'.
+    """
+    try:
+        msg_user = (
+            "USER (natural-language description):\n"
+            f"{user_text}\n\n"
+            "PREDICTION (OpenSCENARIO XML):\n"
+            f"{pred_xosc}\n\n"
+            "Respond with a single number in [0,1]."
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            max_tokens=10,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": msg_user},
+            ],
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+        m = re.search(r"([01](?:\.\d+)?)", txt)
+        if not m:
+            return None
+        val = float(m.group(1))
+        if val < 0: val = 0.0
+        if val > 1: val = 1.0
+        #print(val)
+        return val
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     ap.add_argument("--split", default="validation", choices=["train","validation"])
     ap.add_argument("--limit", type=int, default=200)
+    ap.add_argument("--coherence", action="store_true",
+                    help="Calcola la metrica di coerenza chiamando GPT-5.")
+    ap.add_argument("--coherence_model", default="gpt-5",
+                    help="Modello usato per la coerenza (default: gpt-5).")
+    ap.add_argument("--coherence_sys_prompt", default=(
+        "You are an impartial grader. Given a natural-language description (user) and an "
+        "OpenSCENARIO 1.0 XML (prediction), reply with ONLY one decimal number in [0,1] "
+        "representing how well the XML corresponds to the description (0=no match, 1=perfect match). "
+        "No words, no symbols, no explanation—just the number."
+    ), help="System prompt per il calcolo della coerenza.")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.cfg))
+
+    client = OpenAI() if args.coherence else None
 
     # Carica il tokenizer dalla repo LoRA (così prendi anche chat_template.jinja)
     try:
@@ -377,6 +424,7 @@ def main():
         t_step_start = time.time()
         pred = generate(model, tok, prompt, cfg["max_length"], cfg["do_sample"], cfg["gen_temperature"], cfg["gen_top_p"])
         gen_times.append(time.time() - t_step_start)
+        #print(pred)
 
         # Perplexity Losses
         ppl_losses.append(compute_ppl(model, tok, prompt, gold))
@@ -404,6 +452,17 @@ def main():
             }
         p_bools, g_bools = slots_to_bools(p_slots, pred), slots_to_bools(g_slots, gold)
         prec, rec, f1, acc = bool_f1(g_bools, p_bools)
+
+        # cosa ne pensa gpt?
+        coh = None
+        if args.coherence:
+            coh = ask_coherence(
+                client=client,
+                model=args.coherence_model,
+                sys_prompt=args.coherence_sys_prompt,
+                user_text=ex["user"],
+                pred_xosc=pred,
+            )
 
         # chrF++
         #chrf = sacrebleu.corpus_chrf([pred], [[gold]]).score / 100.0
@@ -435,6 +494,7 @@ def main():
             "exact_match": exact,
             #"rougeL": r,
             "slot_precision": prec, "slot_recall": rec, "slot_f1": f1, "slot_acc": acc,
+            "coherence": coh,
             #"chrfpp": chrf,
             #"meteor": meteor,
             #"bertscore_f1": bert_f1,
@@ -491,6 +551,7 @@ def main():
         "slot_recall": mean("slot_recall"),
         "slot_f1": mean("slot_f1"),
         "slot_accuracy": mean("slot_acc"),
+        "coherence": mean("coherence"),
         #"edit_similarity": mean("edit_sim"),
         #"jaccard_xml_tags": mean("jaccard_tags"),
         #"length_ratio_avg": mean("len_ratio"),

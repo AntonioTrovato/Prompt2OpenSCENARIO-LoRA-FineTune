@@ -72,5 +72,5 @@ def generate_xosc(system: str, user: str, max_new: int = 4000) -> str:
 
 # esempio
 system = "Act as an OpenSCENARIO 1.0 generator for ADS testing in CARLA. I will give you a scene description in English and you must return one valid .xosc file, XML only, encoded in UTF-8, starting with <OpenScenario> and ending with </OpenScenario>. The file must be schema-compliant, and executable in CARLA without modifications. The scenario must include: the map (<RoadNetwork>), <Environment> with <TimeOfDay> and <Weather>, exactly one ego vehicle, any other entities with unique names, initial positions using <WorldPosition>, and a valid <Storyboard> with deterministic triggers/events/actions. Use realistic defaults if details are missing (no randomness), but never omit these features. No comments or extra text, only the .xosc."
-user = "write a little scenario with only one ego vehicle and no other actors, in Towns04, sunny environment (<Precipitation intensity=\"0.5\" precipitationType=\"dry\" />)"
+user = "Generate me a scenario in which the ego vehicle follows other two vehicle. I'm not interested in specific environment or behaviour of entities, just make the ego follow the other 2 vehicles"
 print(generate_xosc(system, user))
