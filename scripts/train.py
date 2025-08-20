@@ -16,131 +16,6 @@ import re
 
 from lxml import etree
 
-EGO_NAME = "ego_vehicle"
-
-def reduce_xosc(xosc_content: str) -> str:
-    """
-    Riduce un file OpenSCENARIO 1.0 secondo le regole:
-    - Niente fusioni tra nodi gemelli (stesso tag).
-    - In ogni gruppo di gemelli per tag:
-        * Se almeno uno 'porta' a entityRef=ego o entityRef=secondo_veicolo, tieni TUTTI quelli che portano a (eccezione).
-        * Altrimenti tieni solo il primo.
-    - Non eliminare <ScenarioObject name="ego_vehicle"> né i suoi figli.
-    - Tra i non-ego referenziati, scegli il primo incontrato come 'secondo_veicolo' e tieni solo quello.
-    - Vietato eliminare rami che portano a entityRef=ego o entityRef=secondo_veicolo.
-    """
-    tree = ET.ElementTree(ET.fromstring(xosc_content))
-    root = tree.getroot()
-
-    # -------------------------------------------------------------
-    # 1) Raccogli i riferimenti entityRef in ORDINE di documento
-    #    (non un set, così il "primo referenziato" è deterministico)
-    # -------------------------------------------------------------
-    ordered_entity_refs: List[str] = []
-    for elem in root.iter():
-        val = elem.attrib.get("entityRef")
-        if val is not None:
-            ordered_entity_refs.append(val)
-
-    # Scegli il "secondo veicolo": primo entityRef != ego
-    second_vehicle = next((v for v in ordered_entity_refs if v != EGO_NAME), None)
-
-    # -------------------------------------------------------------
-    # 2) Mantieni solo ego + (eventuale) secondo_veicolo in <Entities>
-    # -------------------------------------------------------------
-    entities = root.find(".//Entities")
-    if entities is not None:
-        to_remove = []
-        for so in entities.findall("ScenarioObject"):
-            name = so.attrib.get("name")
-            if name == EGO_NAME:
-                continue
-            if name == second_vehicle:
-                continue
-            # rimuovi tutti gli altri non-ego
-            to_remove.append(so)
-        for so in to_remove:
-            entities.remove(so)
-
-    protected_targets = {EGO_NAME}
-    if second_vehicle:
-        protected_targets.add(second_vehicle)
-
-    # -------------------------------------------------------------
-    # 3) Helper: il nodo 'porta' a un protected? (ego o secondo)
-    #    True se nel suo sottoalbero esiste entityRef in protected_targets
-    # -------------------------------------------------------------
-    def leads_to_protected(node: ET.Element) -> bool:
-        for n in node.iter():
-            v = n.attrib.get("entityRef")
-            if v in protected_targets:
-                return True
-        return False
-
-    # -------------------------------------------------------------
-    # 4) Deduplicazione senza fusioni, con eccezione per multipli protetti
-    #    Ragioniamo per gruppi di figli con lo stesso tag
-    # -------------------------------------------------------------
-    def reduce_node(node: ET.Element):
-        # Gruppo i figli per tag
-        children = list(node)
-        by_tag: Dict[str, List[ET.Element]] = {}
-        for ch in children:
-            by_tag.setdefault(ch.tag, []).append(ch)
-
-        # Per ogni gruppo di gemelli per tag, applico la regola
-        for tag, group in by_tag.items():
-            if len(group) <= 1:
-                continue  # niente gemelli
-
-            # Partiziona: protetti vs non protetti
-            protected_group = [g for g in group if leads_to_protected(g)]
-            non_protected_group = [g for g in group if g not in protected_group]
-
-            # Caso A: esistono uno o più protetti -> tieni TUTTI i protetti, elimina tutti i non-protetti
-            if protected_group:
-                to_keep = set(protected_group)
-                to_drop = [g for g in group if g not in to_keep]
-            else:
-                # Caso B: nessun protetto -> tieni SOLO il primo (ordine documento), elimina gli altri
-                to_keep = {group[0]}
-                to_drop = group[1:]
-
-            for g in to_drop:
-                # Non rimuovere l'ego o il secondo veicolo se mai capitassero in un gruppo (per sicurezza)
-                if not (
-                    g.tag == "ScenarioObject"
-                    and g.attrib.get("name") in {EGO_NAME, second_vehicle}
-                ):
-                    node.remove(g)
-
-        # Ricorsione sui figli rimasti
-        for ch in list(node):
-            reduce_node(ch)
-
-    reduce_node(root)
-
-    # Serializza (senza pretty-print per semplicità; aggiungibile se vuoi)
-    return ET.tostring(root, encoding="unicode")
-
-def xsd_ok(x, xsd_path):
-    if not xsd_path or not os.path.isfile(xsd_path):
-        return None, "no_xsd"
-    try:
-        schema = etree.XMLSchema(etree.parse(xsd_path))
-        xml = etree.fromstring(x.encode("utf-8"))
-        return schema.validate(xml), None
-    except Exception as e:
-        return False, str(e)
-
-def reduce_assistant(xosc_text: str, mode: str, xsd_path: str) -> str:
-    if mode == "minify":
-        reduced = reduce_xosc(xosc_text)
-        if xsd_ok(reduced,xsd_path):
-            return reduced
-    # "none"
-    return xosc_text
-
 # -----
 # Main
 # -----
@@ -148,7 +23,6 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     p.add_argument("--jsonl_path", default="")
-    p.add_argument("--reduce_mode", choices=["none","minify"], default="minify")
     args = p.parse_args()
 
     cfg = yaml.safe_load(open(args.cfg))
@@ -220,7 +94,7 @@ def main():
     def to_messages(ex):
         system = ex["system"].strip()
         user = ex["user"].strip()
-        assistant = reduce_assistant(ex["assistant"].strip(), args.reduce_mode, cfg["xsd_path"])
+        assistant = ex["assistant"].strip()
         if not assistant.endswith(stop_seq):
             assistant += stop_seq
 
