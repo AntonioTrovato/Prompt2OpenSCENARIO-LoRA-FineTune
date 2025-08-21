@@ -5,7 +5,7 @@ from openai import OpenAI
 
 import torch
 import yaml
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
 from peft import PeftModel
 from lxml import etree
@@ -320,6 +320,10 @@ def main():
     ap.add_argument("--cfg", default="config/lora-codellama13b.yaml")
     ap.add_argument("--split", default="validation", choices=["train","validation"])
     ap.add_argument("--limit", type=int, default=47)
+    ap.add_argument("--use_jsonl", action="store_true",
+                    help="Se passato, usa un dataset JSONL locale invece di HuggingFace")
+    ap.add_argument("--jsonl_path", default="./datasets/reversed_test_set.jsonl",
+                    help="Percorso al JSONL quando --use_jsonl è attivo")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.cfg))
@@ -365,9 +369,16 @@ def main():
 
     sys_tmpl = open(cfg["sys_template"], "r", encoding="utf-8").read()
 
-    ds = load_dataset(cfg["hf_dataset_repo"], split="train")
-    split = ds.train_test_split(test_size=cfg["val_split_ratio"], seed=42)
-    subset = split["test"] if args.split == "validation" else split["train"]
+    if args.use_jsonl:
+        # Carica l'intero JSONL (nessuna split)
+        with open(args.jsonl_path, "r", encoding="utf-8") as f:
+            records = [json.loads(line) for line in f if line.strip()]
+        ds = Dataset.from_list(records)
+        subset = ds  # tutto il file, senza split
+    else:
+        ds = load_dataset(cfg["hf_dataset_repo"], split="train")
+        split = ds.train_test_split(test_size=cfg["val_split_ratio"], seed=42)
+        subset = split["test"] if args.split == "validation" else split["train"]
     if args.limit:
         subset = subset.shuffle(seed=42)
         subset = subset.select(range(min(args.limit, len(subset))))
@@ -522,13 +533,18 @@ def main():
         "avg_ram_gb": float(np.mean(ram_gbs)) if ram_gbs else None
     }
 
-    os.makedirs("runs/eval", exist_ok=True)
-    with open("runs/eval/metrics.json","w") as f:
+    # --- Salvataggio risultati ---
+    out_dir = "runs/coherence" if args.use_jsonl else "runs/eval"
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(os.path.join(out_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
     print(json.dumps(metrics, indent=2))
-    with open("runs/eval/predictions.jsonl", "w", encoding="utf-8") as f:
+
+    with open(os.path.join(out_dir, "predictions.jsonl"), "w", encoding="utf-8") as f:
         for rec in gen_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
 
 if __name__ == "__main__":
     main()
