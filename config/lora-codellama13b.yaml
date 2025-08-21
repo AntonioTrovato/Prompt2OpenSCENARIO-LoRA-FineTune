@@ -2,6 +2,7 @@ base_model: C:\Users\sesal\Documents\AntonioTrovato\CodeLlama-13b-Instruct-hf
 hf_model_repo: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
 hf_dataset_repo: anto0699/Prompt2OpenSCENARIO-LoRA-FineTune
 output_dir: runs/prompt2openscenario/codellama13b-lora
+plots_dir: runs/prompt2openscenario/plots
 seed: 42
 
 # QLoRA / PEFT
