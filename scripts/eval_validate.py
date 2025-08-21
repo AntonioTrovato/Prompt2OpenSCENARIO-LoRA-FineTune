@@ -373,8 +373,8 @@ def main():
         subset = subset.select(range(min(args.limit, len(subset))))
 
     preds, golds, rows = [], [], []
-    #bleu_refs, bleu_hyps = [], []
-    #rouge = RougeScorer(["rougeL"], use_stemmer=True)
+    bleu_refs, bleu_hyps = [], []
+    rouge = RougeScorer(["rougeL"], use_stemmer=True)
     gen_times, gpu_utils, vram_gbs, ram_gbs = [], [], [], []
     ppl_losses = []
 
@@ -400,72 +400,60 @@ def main():
         exact = int(pred.strip() == gold.strip())
 
         # BLEU / ROUGE
-        #bleu_hyps.append(pred)
-        #bleu_refs.append([gold])
-        #r = rouge.score(gold, pred)["rougeL"].fmeasure
+        bleu_hyps.append(pred)
+        bleu_refs.append([gold])
+        r = rouge.score(gold, pred)["rougeL"].fmeasure
 
         # Slot F1 (da feature extractor)
         p_slots, g_slots = extract_features_from_xosc(pred), extract_features_from_xosc(gold)
 
         def slots_to_bools(s, closing_text):
             return {
-                # presenza mappa
-                "has_map": bool(s.get("map")),
-                # tempo del giorno
-                "has_time": bool(s.get("time_of_day")),
-                # condizioni meteo
-                "has_clouds": bool((s.get("weather") or {}).get("cloud_state")),
-                "has_precipitation": bool((s.get("weather") or {}).get("precipitation")),
-                "has_fog": bool((s.get("weather") or {}).get("fog")),
                 # entità
                 "has_ego": any(e for e in s.get("entities", []) if e.get("type") == "ego"),
                 # posizioni iniziali
-                "has_init_positions": len(s.get("initial_positions", [])) > 0,
-                # eventi/storyboard
-                "has_events": len(s.get("events", [])) > 0,
-                # chiusura corretta
-                "ends_close": closing_text.strip().endswith("</OpenScenario>")
+                "has_init_positions": len(s.get("initial_positions", [])) > 0
             }
 
         p_bools, g_bools = slots_to_bools(p_slots, pred), slots_to_bools(g_slots, gold)
         prec, rec, f1, acc = bool_f1(g_bools, p_bools)
 
         # chrF++
-        #chrf = sacrebleu.corpus_chrf([pred], [[gold]]).score / 100.0
+        chrf = sacrebleu.corpus_chrf([pred], [[gold]]).score / 100.0
 
         # METEOR / BERTScore
-        #meteor = None
-        #if meteor_metric is not None:
-        #    try:
-        #        meteor = meteor_metric.compute(predictions=[pred], references=[gold])["meteor"]
-        #    except Exception:
-        #        meteor = None
+        meteor = None
+        if meteor_metric is not None:
+            try:
+                meteor = meteor_metric.compute(predictions=[pred], references=[gold])["meteor"]
+            except Exception:
+                meteor = None
 
         #bert_f1 = None
-        #if bertscore is not None:
-        #    try:
-        #        bs = bertscore.compute(predictions=[pred], references=[gold], lang="en")
-        #        bert_f1 = float(bs["f1"][0])
-        #    except Exception:
-        #        bert_f1 = None
+        if bertscore is not None:
+            try:
+                bs = bertscore.compute(predictions=[pred], references=[gold], lang="en")
+                bert_f1 = float(bs["f1"][0])
+            except Exception:
+                bert_f1 = None
 
         # Similarità/edit/jaccard/len
-        #edit_sim = norm_edit_distance(pred, gold)
-        #jac_tags = jaccard(extract_xml_tags(pred), extract_xml_tags(gold))
-        #len_ratio = (len(pred) / len(gold)) if len(gold) else 0.0
+        edit_sim = norm_edit_distance(pred, gold)
+        jac_tags = jaccard(extract_xml_tags(pred), extract_xml_tags(gold))
+        len_ratio = (len(pred) / len(gold)) if len(gold) else 0.0
 
         rows.append({
             "wellformed_pred": well_pred,
             "xsd_valid_pred": xsd_pred,
             "exact_match": exact,
-            #"rougeL": r,
+            "rougeL": r,
             "slot_precision": prec, "slot_recall": rec, "slot_f1": f1, "slot_acc": acc,
-            #"chrfpp": chrf,
-            #"meteor": meteor,
-            #"bertscore_f1": bert_f1,
-            #"edit_sim": edit_sim,
-            #"jaccard_tags": jac_tags,
-            #"len_ratio": len_ratio
+            "chrfpp": chrf,
+            "meteor": meteor,
+            "bertscore_f1": bert_f1,
+            "edit_sim": edit_sim,
+            "jaccard_tags": jac_tags,
+            "len_ratio": len_ratio
         })
 
         preds.append(pred); golds.append(gold)
@@ -496,8 +484,8 @@ def main():
             eta = avg * (total - i)
             print(f"{i}/{total}  avg={avg:.1f}s/it  ETA={eta/60:.1f}m", flush=True)
 
-    #refs = list(map(list, zip(*bleu_refs))) if bleu_refs else [[]]
-    #bleu = sacrebleu.corpus_bleu(bleu_hyps, refs)
+    refs = list(map(list, zip(*bleu_refs))) if bleu_refs else [[]]
+    bleu = sacrebleu.corpus_bleu(bleu_hyps, refs)
 
     import numpy as np
     def mean(key):
@@ -515,18 +503,18 @@ def main():
         "xsd_valid_rate": mean("xsd_valid_pred") if cfg["xsd_path"] else None,
         "exact_match": mean("exact_match"),
         "perplexity": avg_ppl,
-        #"bleu": float(bleu.score),
-        #"rougeL_f1": mean("rougeL"),
-        #"chrfpp": mean("chrfpp"),
-        #"meteor": mean("meteor"),
-        #"bertscore_f1": mean("bertscore_f1"),
+        "bleu": float(bleu.score),
+        "rougeL_f1": mean("rougeL"),
+        "chrfpp": mean("chrfpp"),
+        "meteor": mean("meteor"),
+        "bertscore_f1": mean("bertscore_f1"),
         "slot_precision": mean("slot_precision"),
         "slot_recall": mean("slot_recall"),
         "slot_f1": mean("slot_f1"),
         "slot_accuracy": mean("slot_acc"),
-        #"edit_similarity": mean("edit_sim"),
-        #"jaccard_xml_tags": mean("jaccard_tags"),
-        #"length_ratio_avg": mean("len_ratio"),
+        "edit_similarity": mean("edit_sim"),
+        "jaccard_xml_tags": mean("jaccard_tags"),
+        "length_ratio_avg": mean("len_ratio"),
         "avg_generation_time_s": float(np.mean(gen_times)) if gen_times else None,
         "throughput_scen_per_s": throughput_scen_per_s,
         "avg_gpu_util_percent": float(np.mean(gpu_utils)) if gpu_utils else None,
