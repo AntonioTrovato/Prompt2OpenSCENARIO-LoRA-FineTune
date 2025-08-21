@@ -6,7 +6,7 @@ import yaml
 def main():
     parser = argparse.ArgumentParser(description="Plot training/eval loss & perplexity from log_history.")
     parser.add_argument("--log_history", required=True, help="Path to JSON file containing state['log_history'].")
-    parser.add_argument("--cfg", default="./configlora-codellama13b.yaml", help="Path to YAML config.")
+    parser.add_argument("--cfg", default="./config/lora-codellama13b.yaml", help="Path to YAML config.")
     args = parser.parse_args()
 
     # Load config

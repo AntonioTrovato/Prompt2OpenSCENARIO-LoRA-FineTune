@@ -2,9 +2,33 @@ import json, os, argparse
 import matplotlib.pyplot as plt
 import yaml
 
+def _num(x, scale=1.0, default=0.0):
+    """Converte in float gestendo None e stringhe. Applica uno scale opzionale."""
+    if x is None:
+        return default
+    try:
+        return float(x) * scale
+    except Exception:
+        return default
+
+def _bar(ax, labels, values, title, ylim01=False):
+    ax.bar(labels, values)
+    vmax = max(values) if values else 1.0
+    if ylim01:
+        # aggiungo 10% di margine ma senza superare 1.1
+        ax.set_ylim(0, min(1.1, vmax * 1.1))
+    else:
+        ax.set_ylim(0, vmax * 1.1 if vmax > 0 else 1.0)
+
+    ax.set_title(title)
+    for i, v in enumerate(values):
+        ax.text(i, v + (vmax * 0.02), f"{v:.2f}", ha="center", rotation=0)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+
 def main():
-    parser = argparse.ArgumentParser(description="Plot evaluation summary from metrics.json")
-    parser.add_argument("--cfg", default="./configlora-codellama13b.yaml", help="Path to YAML config.")
+    parser = argparse.ArgumentParser(description="Plot evaluation summary (grouped bar charts)")
+    parser.add_argument("--cfg", default="./config/lora-codellama13b.yaml", help="Path to YAML config.")
     parser.add_argument("--input_path", required=True, help="Path to metrics.json")
     args = parser.parse_args()
 
@@ -20,52 +44,75 @@ def main():
     with open(args.input_path, "r", encoding="utf-8") as f:
         m = json.load(f)
 
-    labels = [
-        "XML ok","XSD ok","Exact","Perplexity","BLEu","ROUGE-L F1","CHRFPP","METEOR","BERT Score F1",
-        "Slot Prec","Slot Rec","Slot Acc","Slot F1","Edit Similarity","Jaccard XML Tags","Length Ratio Avg",
-        "Avg Generation Time (s)", "Throughput Scenarios per Gen (s)","Avg GPU Util (%)", "Avg VRAM GBs", "Avg RAM GBs"
-    ]
-
+    # ---- 1) XML wellformed + XSD valid (0..1)
+    labels = ["XML ok", "XSD ok"]
     values = [
-        m.get("xml_wellformed_rate", 0) or 0,                                  # XML ok
-        (m.get("xsd_valid_rate", 0) or 0) if m.get("xsd_valid_rate") is not None else 0,   # XSD ok
-        m.get("exact_match", 0) or 0,                                          # Exact
-        m.get("perplexity", 0) or 0,                                           # Perplexity
-        (m.get("bleu", 0) or 0) / 100.0 if m.get("bleu") is not None else 0,   # BLEU
-        m.get("rougeL_f1", 0) or 0,                                            # ROUGE-L F1
-        m.get("chrfpp", 0) or 0,                                               # CHRFPP
-        m.get("meteor", 0) or 0,                                               # METEOR
-        m.get("bertscore_f1", 0) or 0,                                         # BERT Score F1
-        m.get("slot_precision", 0) or 0,                                       # Slot Prec
-        m.get("slot_recall", 0) or 0,                                          # Slot Rec
-        m.get("slot_accuracy", 0) or 0,                                        # Slot Acc
-        m.get("slot_f1", 0) or 0,                                              # Slot F1
-        m.get("edit_similarity", 0) or 0,                                      # Edit Similarity
-        m.get("jaccard_xml_tags", 0) or 0,                                     # Jaccard XML Tags
-        m.get("length_ratio_avg", 0) or 0,                                     # Length Ratio Avg
-        m.get("avg_generation_time_s", 0) or 0,                                # Avg Generation Time (s)
-        m.get("throughput_scen_per_s", 0) or 0,                                # Throughput Scenarios per Gen (s)
-        m.get("avg_gpu_util_percent", 0) or 0,                                 # Avg GPU Util (%)
-        m.get("avg_vram_gb", 0) or 0,                                          # Avg VRAM GBs
-        m.get("avg_ram_gb", 0) or 0                                            # Avg RAM GBs
+        _num(m.get("xml_wellformed_rate")),
+        _num(m.get("xsd_valid_rate")),
     ]
+    fig, ax = plt.subplots()
+    _bar(ax, labels, values, "XML wellformed & XSD valid", ylim01=True)
+    fig.tight_layout(); fig.savefig(os.path.join(plots_dir, "eval_xml_xsd.png"), dpi=160); plt.close(fig)
 
-    plt.figure()
-    plt.bar(labels, values)
-    plt.ylim(0, 1)  # mantiene il comportamento originale (alcune metriche potrebbero superare 1)
-    plt.title("Evaluation summary")
-    for i, v in enumerate(values):
-        try:
-            txt = f"{float(v):.2f}"
-        except Exception:
-            txt = str(v)
-        plt.text(i, (v if isinstance(v, (int, float)) else 0) + 0.01, txt, ha="center", rotation=0)
-    plt.xticks(rotation=45, ha="right")
-    plt.tight_layout()
+    # ---- 2) BLEU (/100) + ROUGE-L F1 (0..1)
+    labels = ["BLEU", "ROUGE-L F1"]
+    values = [
+        _num(m.get("bleu"), 1.0/100.0),
+        _num(m.get("rougeL_f1")),
+    ]
+    fig, ax = plt.subplots()
+    _bar(ax, labels, values, "BLEU (÷100) & ROUGE-L F1", ylim01=True)
+    fig.tight_layout(); fig.savefig(os.path.join(plots_dir, "eval_bleu_rouge.png"), dpi=160); plt.close(fig)
 
-    out_path = os.path.join(plots_dir, "eval_summary.png")
-    plt.savefig(out_path, dpi=160)
-    print(f"Saved {out_path}")
+    # ---- 3) CHRFPP + METEOR
+    labels = ["CHRF++", "METEOR"]
+    values = [
+        _num(m.get("chrfpp")),
+        _num(m.get("meteor")),
+    ]
+    fig, ax = plt.subplots()
+    _bar(ax, labels, values, "CHRF++ & METEOR", ylim01=True)
+    fig.tight_layout(); fig.savefig(os.path.join(plots_dir, "eval_chrfpp_meteor.png"), dpi=160); plt.close(fig)
+
+    # ---- 4) Slot metrics
+    labels = ["Slot Prec", "Slot Rec", "Slot Acc", "Slot F1"]
+    values = [
+        _num(m.get("slot_precision")),
+        _num(m.get("slot_recall")),
+        _num(m.get("slot_accuracy")),
+        _num(m.get("slot_f1")),
+    ]
+    fig, ax = plt.subplots()
+    _bar(ax, labels, values, "Slot Metrics", ylim01=True)
+    fig.tight_layout(); fig.savefig(os.path.join(plots_dir, "eval_slot_metrics.png"), dpi=160); plt.close(fig)
+
+    # ---- 5) Edit/Jaccard/Length
+    labels = ["Edit Sim",
+              "Jaccard Tags",
+              "Length Ratio Avg"]
+    values = [
+        _num(m.get("edit_similarity")),
+        _num(m.get("jaccard_xml_tags")),
+        _num(m.get("length_ratio_avg")),
+    ]
+    fig, ax = plt.subplots()
+    _bar(ax, labels, values, "Edit"
+                             "/Jaccard"
+                             "/Length Ratio", ylim01=True)
+    fig.tight_layout(); fig.savefig(os.path.join(plots_dir, "eval"
+                                                            "_jaccard"
+                                                            "_edit_length.png"), dpi=160); plt.close(fig)
+
+    # ---- 6) Memory usage
+    labels = ["Avg VRAM (GB)", "Avg RAM (GB)"]
+    values = [
+        _num(m.get("avg_vram_gb")),
+        _num(m.get("avg_ram_gb")),
+    ]
+    fig, ax = plt.subplots()
+    _bar(ax, labels, values, "Memory Usage")
+    ax.set_ylabel("GB")
+    fig.tight_layout(); fig.savefig(os.path.join(plots_dir, "eval_memory.png"), dpi=160); plt.close(fig)
 
 if __name__ == "__main__":
     main()
