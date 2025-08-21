@@ -1,6 +1,6 @@
 base_model: C:\Users\sesal\Documents\AntonioTrovato\CodeLlama-13b-Instruct-hf
-hf_model_repo: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
-hf_dataset_repo: anto0699/Prompt2OpenSCENARIO-LoRA-FineTune
+hf_model_repo: anto0699/OpenSCENARIO2Prompt-CodeLlama13B-LoRA
+hf_dataset_repo: anto0699/OpenSCENARIO2Prompt-LoRA-FineTune
 output_dir: runs/codellama13b-lora
 seed: 42
 
@@ -38,10 +38,10 @@ packing: false # not concatenating more examples in the same batch
 
 # Hub
 push_to_hub: true # at the end, automatically pushes the adapters on the correct repo
-hub_model_id: anto0699/Prompt2OpenSCENARIO-CodeLlama13B-LoRA
+hub_model_id: anto0699/OpenSCENARIO2Prompt-CodeLlama13B-LoRA
 
 # Generation (per validazione)
-gen_max_new_tokens: 4000 # max generated tokens
+gen_max_new_tokens: 2000 # max generated tokens (4000)
 do_sample: False # this enables or not the use of temperature and top_p
 gen_temperature: 0.1 # almost deterministic
 gen_top_p: 0.9 # almost deterministic

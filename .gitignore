@@ -205,4 +205,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+runs/prompt2openscenario/codellama13b-lora
 runs/codellama13b-lora
