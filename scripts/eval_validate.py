@@ -429,7 +429,7 @@ def main():
             except Exception:
                 meteor = None
 
-        #bert_f1 = None
+        bert_f1 = None
         if bertscore is not None:
             try:
                 bs = bertscore.compute(predictions=[pred], references=[gold], lang="en")
